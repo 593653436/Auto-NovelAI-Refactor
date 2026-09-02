@@ -656,6 +656,10 @@ function buildParamsTab(body, saved) {
   const w0 = saved.width ?? 832, h0 = saved.height ?? 1216;
   C.resolution.set(S.app.resolutions.includes(w0 + "x" + h0) ? w0 + "x" + h0 : "自定义");
   resRow.append(C.resolution.node, C.width.node, C.height.node);
+  // 画布比例跟随当前分辨率 (功能2-B): 分辨率/宽/高变化时刷新画布长宽比
+  C.resolution.input?.addEventListener("change", () => posCanvas?.refreshRatio());
+  C.width.input?.addEventListener("change", () => posCanvas?.refreshRatio());
+  C.height.input?.addEventListener("change", () => posCanvas?.refreshRatio());
   card.append(resRow);
 
   // 采样
@@ -1221,11 +1225,17 @@ function buildPositionCanvas() {
   const doneBtn = el("button", { class: "btn btn-sm", type: "button", text: "✅ 完成位置编辑" });
   head.append(title, hint, gridLabel, doneBtn);
   const canvas = el("div", {
-    style: "position:relative;width:100%;aspect-ratio:832/1216;max-height:520px;margin-top:8px;background:rgba(127,127,127,.08);border:1px solid var(--border);border-radius:8px;overflow:hidden;touch-action:none;",
+    style: "position:relative;width:100%;aspect-ratio:832/1216;margin-top:8px;background:rgba(127,127,127,.08);border:1px solid var(--border);border-radius:8px;overflow:hidden;touch-action:none;",
   });
   const gridOverlay = el("div", { style: "position:absolute;inset:0;pointer-events:none;display:none;" });
   canvas.append(gridOverlay);
   wrap.append(head, canvas);
+  /** 画布比例跟随当前设置的分辨率 (宽/高), 使圆点位置=图内真实位置 */
+  function refreshRatio() {
+    const w = Number(C.width.get()) || 832;
+    const h = Number(C.height.get()) || 1216;
+    canvas.style.aspectRatio = (w && h) ? (w + " / " + h) : "832 / 1216";
+  }
   let roles = [];
   let active = -1;
   function drawGrid() {
@@ -1287,9 +1297,10 @@ function buildPositionCanvas() {
     toast("角色位置已更新 🎨", "success");
   });
   return {
-    mount: (parent) => { parent.append(wrap); },
-    setMode: (isNai5) => { if (isNai5) { wrap.style.display = ""; syncRoles(); } else { wrap.style.display = "none"; active = -1; } },
+    mount: (parent) => { parent.append(wrap); refreshRatio(); },
+    setMode: (isNai5) => { if (isNai5) { wrap.style.display = ""; refreshRatio(); syncRoles(); } else { wrap.style.display = "none"; active = -1; } },
     sync: () => { if (wrap.style.display !== "none") syncRoles(); },
+    refreshRatio,
     destroy: () => { wrap.remove(); },
   };
 }
