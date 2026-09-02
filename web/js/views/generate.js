@@ -409,26 +409,13 @@ function buildOutputViewer(container, images) {
     if (e.key === "ArrowRight") { idx = (idx + 1) % images.length; updateView(); e.preventDefault(); }
   });
 
-  // 工位模式(模糊)下: 单击放大 / 双击显示原图(不放大); 非工位: 单击选中 / 双击放大
-  let peekClickTimer = null;
-  mainImg.addEventListener("click", () => {
-    if (document.body.classList.contains("peek-mode")) {
-      // peek: 单击延迟放大, 双击则取消(只显示原图, 不放大)
-      clearTimeout(peekClickTimer);
-      peekClickTimer = setTimeout(async () => {
-        const { openLightbox } = await import("../components.js");
-        openLightbox(imageUrl(images[idx]), "第 " + (idx + 1) + " 张");
-      }, 240);
-    } else {
-      setOutputSelection(images[idx]);
-    }
-  });
+  // 双击主图放大 (显示原图走 工位模式 的 悬停+R 键)
   mainImg.addEventListener("dblclick", async () => {
-    if (document.body.classList.contains("peek-mode")) return; // 双击不放大, 显示原图交给全局 dblclick 委托
-    clearTimeout(peekClickTimer);
     const { openLightbox } = await import("../components.js");
     openLightbox(imageUrl(images[idx]), "第 " + (idx + 1) + " 张");
   });
+  // 单击主图: 选中发送
+  mainImg.addEventListener("click", () => setOutputSelection(images[idx]));
 
   // 预加载相邻图片
   function preloadAdjacent() {

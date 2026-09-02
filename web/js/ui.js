@@ -684,14 +684,24 @@ export function applyPeekMode(enabled) {
   st.textContent =
     'body.peek-mode img:not([src*="assets/emoji"]):not([src*="/logo"]):not([src*="favicon"]):not([src*=".svg"]){filter:blur(16px) saturate(.35);cursor:zoom-in;}' +
     'body.peek-mode img.revealed{filter:none !important;}'
-  if (!document._peekDbl) {
-    document._peekDbl = true;
-    // 单击已被"放大查看"占用, 改为双击显示原图 / 再双击恢复模糊
-    document.addEventListener("dblclick", (e) => {
-      const img = e.target && e.target.closest ? e.target.closest("img") : null;
-      if (!img) return;
-      if (img.matches('[src*="assets/emoji"],[src*=".svg"],[src*="logo"],[src*="favicon"]')) return;
-      if (document.body.classList.contains("peek-mode")) img.classList.toggle("revealed");
+  if (!document._peekKey) {
+    document._peekKey = true;
+    const isUi = (img) => img.matches('[src*="assets/emoji"],[src*=".svg"],[src*="logo"],[src*="favicon"]');
+    let hoverImg = null;
+    // 追踪鼠标悬停的内容图
+    document.addEventListener("mousemove", (e) => {
+      hoverImg = (e.target && e.target.closest) ? e.target.closest("img") : null;
+    });
+    // 悬停在高斯模糊的图上, 按 R 键显示原图 / 再按 R 恢复模糊
+    document.addEventListener("keydown", (e) => {
+      if (e.key !== "r" && e.key !== "R") return;
+      if (!document.body.classList.contains("peek-mode")) return;
+      // 在输入框/文本域内按 r 不触发, 避免误操作
+      if (e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable)) return;
+      const img = hoverImg;
+      if (!img || isUi(img)) return;
+      img.classList.toggle("revealed");
+      e.preventDefault();
     });
   }
 }
