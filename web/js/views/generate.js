@@ -194,7 +194,7 @@ function buildSavedState() {
     sm_dyn: p.sm_dyn ?? stored.sm_dyn ?? false,
     legacy_uc: p.legacy_uc ?? stored.legacy_uc ?? false,
     enhance: stored.enhance ?? { enabled: false, amount: "1.5x", magnitude: 1 },
-    characters: lastCharacters(p, model),
+    characters: (() => { const c = lastCharacters(p, model); return (c && c.length) ? c : (stored.characters || []); })(),
   };
 }
 
@@ -1061,6 +1061,8 @@ async function onGenerate() {
       width: C.width.get(), height: C.height.get(), steps: C.steps.get(), scale: C.scale.get(),
       cfg_rescale: C.cfgRescale.get(), seed: C.seed.get(), quantity: C.quantity.get(), furry_mode: furryMode,
       enhance: { enabled: C.enhance.get(), amount: C.enhanceAmount.get(), magnitude: C.magnitude.get() },
+      // 角色提示词一并持久化, 刷新后像正向提示词一样保持 (含禁用角色)
+      characters: charList.getItems(),
     };
     S.store.save(state);
   } catch { /* ignore */ }
