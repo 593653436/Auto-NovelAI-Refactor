@@ -1,7 +1,7 @@
 // ============================================================
 // 配置设置视图
 // ============================================================
-import { $, el, clear, toast, confirmDialog, sliderRow } from "../ui.js";
+import { $, el, clear, toast, confirmDialog, sliderRow, applyPeekMode } from "../ui.js";
 import { post, get } from "../api.js";
 
 
@@ -76,6 +76,7 @@ export async function render(container, ctx) {
   cf("🔄 429 自动重试", "retry_429", "遇到 429 限流时无上限自动重试; 未开启时出错最多自动重试 3 次 (每次等待 5 秒, 仍失败则跳过该张继续生成)");
   cf("🧩 禁用全部插件", "disable_all_plugins");
   cf("🖥️ 隐藏终端启动", "hide_terminal", "通过 run.bat 启动时自动隐藏并关闭终端窗口, 退出请用右上角电源按钮");
+  cf("🕶️ 工位模式", "wework_mode", "开启后所有图片高斯模糊 (防偷看/摸鱼掩护), 点击图片可查看原图");
   sf("⏱️ 冷却时间 (秒)", "cool_time", 1, 600, 1, "会上下浮动 1 秒");
   sf("📧 SMTP 触发数量", "smtp_num", 0, 9999, 1, "超过该数量时生成结束发送邮件, 0 为关闭");
   tf("📧 QQ 邮箱", "smtp_mail", "text", "发送/接收邮件的 QQ 邮箱");
@@ -110,6 +111,8 @@ export async function render(container, ctx) {
         return;
       }
       toast(res.message, "success");
+      // 工位模式保存后即时生效 (无需重启)
+      try { applyPeekMode(collect().wework_mode); } catch { /* ignore */ }
       // 检测端口 / 隐藏终端变更, 额外提示重启事项
       if (res.port_changed) {
         toast("端口修改需重启后重新绑定", "warning", 6000);

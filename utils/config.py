@@ -35,6 +35,7 @@ DEFAULTS: dict[str, Any] = {
     "smtp_num": 0,
     "smtp_mail": None,
     "smtp_token": None,
+    "wework_mode": False,
 }
 
 _LIST_KEYS = {"tokens"}
@@ -50,6 +51,7 @@ _BOOL_KEYS = {
     "skip_inquire_anlas",
     "format_input",
     "remove_nsfw",
+    "wework_mode",
 }
 _INT_KEYS = {"cool_time", "port", "smtp_num"}
 

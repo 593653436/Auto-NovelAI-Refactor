@@ -8,7 +8,7 @@ import { initEmoji } from "./emoji.js";
 import { initHitokoto } from "./hitokoto.js";
 import { initQueueModal } from "./queueModal.js";
 import { fetchState, post } from "./api.js";
-import { $, $$, el, bus, toast, confirmDialog, choiceDialog, initFancySelects } from "./ui.js";
+import { $, $$, el, bus, toast, confirmDialog, choiceDialog, initFancySelects, applyPeekMode } from "./ui.js";
 
 import * as generateView from "./views/generate.js";
 import * as directorView from "./views/director.js";
@@ -89,6 +89,7 @@ async function boot() {
   try {
     const [state] = await Promise.all([fetchState(), initBackground()]);  // 背景状态与应用状态并行加载
     appState = state;
+    applyPeekMode(appState.settings?.wework_mode);
     document.getElementById("version-badge").textContent = "v" + appState.version;
     if (appState.update?.available) document.getElementById("version-badge").textContent += " · 更新可用";
   } catch (e) {

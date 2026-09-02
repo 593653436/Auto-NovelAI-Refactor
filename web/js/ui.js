@@ -674,6 +674,27 @@ export function wireAutocomplete(textarea, wrap, opts = {}) {
  * 统一滑条控件: 左侧 range, 右侧可直接键入数值。
  * 返回 { node, input(range), num(number input), get(), set(v) }
  */
+/** 工位模式: 开启后所有内容图片高斯模糊, 点击图片查看原图 (防偷看/摸鱼掩护) */
+export function applyPeekMode(enabled) {
+  document.body.classList.toggle("peek-mode", !!enabled);
+  let st = document.querySelector("style[data-peek]");
+  if (!st) { st = document.createElement("style"); st.setAttribute("data-peek", ""); document.head.appendChild(st); }
+  // 注意 blur 规则带 4 个 :not 属性选择器，specificity(0,5,2) 高于 img.revealed(0,2,2)，
+  // 必须用 !important 才能让"点击显原图"压过模糊
+  st.textContent =
+    'body.peek-mode img:not([src*="assets/emoji"]):not([src*="/logo"]):not([src*="favicon"]):not([src*=".svg"]){filter:blur(16px) saturate(.35);cursor:zoom-in;}' +
+    'body.peek-mode img.revealed{filter:none !important;}'
+  if (!document._peekClick) {
+    document._peekClick = true;
+    document.addEventListener("click", (e) => {
+      const img = e.target && e.target.closest ? e.target.closest("img") : null;
+      if (!img) return;
+      if (img.matches('[src*="assets/emoji"],[src*=".svg"],[src*="logo"],[src*="favicon"]')) return;
+      if (document.body.classList.contains("peek-mode")) img.classList.toggle("revealed");
+    });
+  }
+}
+
 export function sliderRow(spec) {
   const min = spec.min ?? 0;
   const max = spec.max ?? 100;
