@@ -404,6 +404,13 @@ function buildOutputViewer(container, images, startIdx = 0) {
     thumbs.forEach((t, i) => t.classList.toggle("active", i === idx));
     currentViewIdx = idx;
     setOutputSelection(path);
+    // 缩略图条滚到当前查看的图 (生成后重建不再跑回开头, 停在当前/新图对应的缩略图)
+    const at = thumbs[idx];
+    if (at && thumbStrip.scrollWidth > thumbStrip.clientWidth) {
+      const tr = at.getBoundingClientRect(), sr = thumbStrip.getBoundingClientRect();
+      if (tr.left < sr.left) thumbStrip.scrollLeft -= (sr.left - tr.left);
+      else if (tr.right > sr.right) thumbStrip.scrollLeft += (tr.right - sr.right);
+    }
   }
 
   // 键盘左右键切换 (每次重建先解除旧监听, 只保留最新一个, 避免累积后按键叠加)

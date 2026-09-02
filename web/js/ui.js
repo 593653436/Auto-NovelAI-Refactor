@@ -277,6 +277,7 @@ export function closeToastNode(node) {
 
 export function toast(message, type = "info", _duration = 0) {
   const box = document.getElementById("toasts");
+  box.style.pointerEvents = "none"; // 容器本身也穿透, 避免整个提示区挡住开始生成按钮
   const node = el("div", { class: `toast ${type}` });
   // 提示可点击穿透, 不挡住下方控件(如开始生成按钮); 仅 ✕ 可点
   node.style.pointerEvents = "none";
