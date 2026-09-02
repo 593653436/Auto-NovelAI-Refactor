@@ -656,8 +656,9 @@ function buildParamsTab(body, saved) {
   const w0 = saved.width ?? 832, h0 = saved.height ?? 1216;
   C.resolution.set(S.app.resolutions.includes(w0 + "x" + h0) ? w0 + "x" + h0 : "自定义");
   resRow.append(C.resolution.node, C.width.node, C.height.node);
-  // 画布比例跟随当前分辨率 (功能2-B): 分辨率/宽/高变化时刷新画布长宽比
-  C.resolution.input?.addEventListener("change", () => posCanvas?.refreshRatio());
+  // 画布比例跟随当前分辨率 (功能2-B)
+  // 分辨率预设 change 时, 项目会同步 set 宽/高, 因此用 setTimeout(0) 等联动完成后再读, 否则读到旧值会滞后一步
+  C.resolution.input?.addEventListener("change", () => setTimeout(() => posCanvas?.refreshRatio(), 0));
   C.width.input?.addEventListener("change", () => posCanvas?.refreshRatio());
   C.height.input?.addEventListener("change", () => posCanvas?.refreshRatio());
   card.append(resRow);
