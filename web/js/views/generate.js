@@ -1157,11 +1157,12 @@ function applyImportedState(state) {
   setGenerateState(st);
 }
 
-/** 生成页全局拖放: 拖入图片松开即导入提示词+角色 (不加按钮/入口) */
+/** 生成页全局拖放: 拖入图片(文件)松开才导入提示词+角色 (内部元素拖拽不触发) */
 let _dropMask = null;
 function attachGlobalDrop(container) {
   if (!container || _dropMask) return;
   const mask = el("div", {
+    class: "anr-drop-mask",
     html: "🖼️ 松开导入提示词",
     style:
       "position:fixed;inset:0;z-index:99990;display:none;align-items:center;justify-content:center;" +
@@ -1170,10 +1171,13 @@ function attachGlobalDrop(container) {
   document.body.appendChild(mask);
   _dropMask = mask;
   let depth = 0;
-  // 避开子组件自带的拖放区 (参考图/风格迁移/图生图编辑器/输入框), 交给它们处理
-  const inSub = (t) => t && t.closest && t.closest("textarea, input, select, .img-drop-zone, .ta-box, .file-drop-zone, [data-drop='1']");
+  // 避开子组件自带的拖放区 (参考图/风格迁移/图生图编辑器/输入框/角色卡片/画布), 交给它们处理
+  const inSub = (t) => t && t.closest && t.closest("textarea, input, select, .img-drop-zone, .ta-box, .file-drop-zone, [data-drop='1'], .role-card, .role-grip, .pos-grid-picker");
+  // 只有"拖文件"才是导入; 内部元素拖拽(角色排序等)的 types 不含 Files
+  const isFileDrag = (e) => !!e.dataTransfer && !!e.dataTransfer.types && Array.prototype.includes.call(e.dataTransfer.types, "Files");
   container.addEventListener("dragover", (e) => {
     if (inSub(e.target)) return;
+    if (!isFileDrag(e)) return; // 内部拖拽不弹导入遮罩
     e.preventDefault();
     if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
     depth = 1;
@@ -1186,11 +1190,12 @@ function attachGlobalDrop(container) {
   });
   container.addEventListener("drop", async (e) => {
     if (inSub(e.target)) return;
+    // 没有文件 = 内部拖拽(排序/移动), 忽略, 不触发导入
+    if (!(e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length)) return;
     e.preventDefault();
     mask.style.display = "none";
     depth = 0;
-    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-    if (!f) return;
+    const f = e.dataTransfer.files[0];
     if (!/\.(png|jpe?g|webp)$/i.test(f.name)) { toast("仅支持图片(PNG/JPG/WebP)", "warning"); return; }
     try {
       const [{ path }] = await uploadFiles([f]);
