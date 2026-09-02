@@ -278,8 +278,11 @@ export function closeToastNode(node) {
 export function toast(message, type = "info", _duration = 0) {
   const box = document.getElementById("toasts");
   const node = el("div", { class: `toast ${type}` });
+  // 提示可点击穿透, 不挡住下方控件(如开始生成按钮); 仅 ✕ 可点
+  node.style.pointerEvents = "none";
   const text = el("span", { class: "toast-text", text: message });
   const close = el("button", { class: "toast-close", type: "button", text: "✕", title: "关闭" });
+  close.style.pointerEvents = "auto";
   close.addEventListener("click", () => closeToastNode(node));
   node.append(text, close);
   box.append(node);
