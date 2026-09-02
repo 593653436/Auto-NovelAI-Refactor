@@ -362,21 +362,21 @@ function buildOutputViewer(container, images, startIdx = 0) {
     stopAuto();
     mainWrap.classList.add(dir < 0 ? "auto-flip-left" : "auto-flip-right");
     autoDelay = setTimeout(() => {
-      autoTimer = setInterval(() => { idx = (idx + dir + images.length) % images.length; updateView(); }, 2500);
+      autoTimer = setInterval(() => { idx = Math.max(0, Math.min(images.length - 1, idx + dir)); updateView(); }, 2500);
     }, 1500);
   }
-  prevBtn.addEventListener("click", (e) => { e.stopPropagation(); stopAuto(); idx = (idx - 1 + images.length) % images.length; updateView(); });
+  prevBtn.addEventListener("click", (e) => { e.stopPropagation(); stopAuto(); idx = Math.max(0, idx - 1); updateView(); });
   prevBtn.addEventListener("mouseenter", () => startAuto(-1));
   prevBtn.addEventListener("mouseleave", stopAuto);
-  nextBtn.addEventListener("click", (e) => { e.stopPropagation(); stopAuto(); idx = (idx + 1) % images.length; updateView(); });
+  nextBtn.addEventListener("click", (e) => { e.stopPropagation(); stopAuto(); idx = Math.min(images.length - 1, idx + 1); updateView(); });
   nextBtn.addEventListener("mouseenter", () => startAuto(1));
   nextBtn.addEventListener("mouseleave", stopAuto);
   // 悬停在主图左右各 30% 区域也触发自动翻页 (与箭头按钮联动), 点击直接切换
   mainWrap.addEventListener("click", (e) => {
     const rect = mainWrap.getBoundingClientRect();
     const rel = (e.clientX - rect.left) / rect.width;
-    if (rel < 0.3) { stopAuto(); idx = (idx - 1 + images.length) % images.length; updateView(); }
-    else if (rel > 0.7) { stopAuto(); idx = (idx + 1) % images.length; updateView(); }
+    if (rel < 0.3) { stopAuto(); idx = Math.max(0, idx - 1); updateView(); }
+    else if (rel > 0.7) { stopAuto(); idx = Math.min(images.length - 1, idx + 1); updateView(); }
   });
   mainWrap.addEventListener("mouseenter", (e) => {
     const rect = mainWrap.getBoundingClientRect();
@@ -408,8 +408,8 @@ function buildOutputViewer(container, images, startIdx = 0) {
   if (container._anrOnKey) document.removeEventListener("keydown", container._anrOnKey);
   container._anrOnKey = function onKey(e) {
     if (!container.isConnected) { document.removeEventListener("keydown", onKey); return; }
-    if (e.key === "ArrowLeft") { idx = (idx - 1 + images.length) % images.length; updateView(); e.preventDefault(); }
-    if (e.key === "ArrowRight") { idx = (idx + 1) % images.length; updateView(); e.preventDefault(); }
+    if (e.key === "ArrowLeft") { idx = Math.max(0, idx - 1); updateView(); e.preventDefault(); }
+    if (e.key === "ArrowRight") { idx = Math.min(images.length - 1, idx + 1); updateView(); e.preventDefault(); }
   };
   document.addEventListener("keydown", container._anrOnKey);
 
