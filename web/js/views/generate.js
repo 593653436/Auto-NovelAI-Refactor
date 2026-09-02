@@ -86,7 +86,7 @@ export async function render(container, ctx) {
   container.append(el("h2", {}, ["🖼️ 图片生成", el("span", { class: "sub", text: "NovelAI 批量生图" })]));
 
   // 标题下方 / 提示词上方: 单条工具条 (左: 模型+Mode, 右: 数量+生成按钮)
-  const modelBar = el("div", { class: "model-bar" });
+  const modelBar = el("div", { class: "model-bar", style: "position:sticky;top:0;z-index:60;background:var(--card);" });
   buildModelBar(modelBar, saved);
   container.append(modelBar);
 
