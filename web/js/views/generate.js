@@ -1087,10 +1087,11 @@ function onJobDone(ev) {
   if (ev.images?.length) {
     lastGeneratedImages = ev.images;
     const oldLen = allOutputImages.length;
-    // 正在看"非最后一张"时不跟随跳转, 停留原图; 停在"最后一张(最新)"时新图出来就跳过去
-    const wasAtEnd = currentViewIdx === oldLen - 1;
+    const oldSel = selectedOutputPath; // 生成前正在查看的图
+    // 正在看的恰好是旧的"最后一张"时, 新图出来后跟随跳到新图; 否则按原图路径停留
+    const wasAtEnd = oldLen > 0 && oldSel === allOutputImages[oldLen - 1];
     allOutputImages.push(...ev.images);
-    const startIdx = wasAtEnd ? oldLen : currentViewIdx;
+    const startIdx = wasAtEnd ? oldLen : Math.max(0, allOutputImages.indexOf(oldSel));
     buildOutputViewer(genGalleryEl, allOutputImages, startIdx);
   }
   if (ev.message) {
