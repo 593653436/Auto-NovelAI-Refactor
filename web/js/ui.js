@@ -684,9 +684,10 @@ export function applyPeekMode(enabled) {
   st.textContent =
     'body.peek-mode img:not([src*="assets/emoji"]):not([src*="/logo"]):not([src*="favicon"]):not([src*=".svg"]){filter:blur(16px) saturate(.35);cursor:zoom-in;}' +
     'body.peek-mode img.revealed{filter:none !important;}'
-  if (!document._peekClick) {
-    document._peekClick = true;
-    document.addEventListener("click", (e) => {
+  if (!document._peekDbl) {
+    document._peekDbl = true;
+    // 单击已被"放大查看"占用, 改为双击显示原图 / 再双击恢复模糊
+    document.addEventListener("dblclick", (e) => {
       const img = e.target && e.target.closest ? e.target.closest("img") : null;
       if (!img) return;
       if (img.matches('[src*="assets/emoji"],[src*=".svg"],[src*="logo"],[src*="favicon"]')) return;
