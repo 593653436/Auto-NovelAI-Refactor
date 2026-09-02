@@ -5,13 +5,14 @@
 //   Wildcards 功能入口在每个提示词输入框右上角 (点击弹出全屏编辑窗口)
 // ============================================================
 import { $, $$, el, clear, toast, bus, sliderRow, edgeScroll, imageDropZone, fileDropZone, wireAutocomplete, wildcardsButton } from "../ui.js";
-import { post, imageUrl, fetchLast, openDir } from "../api.js";
+import { post, imageUrl, fetchLast, openDir, uploadFiles } from "../api.js";
 import { gallery, imageEditor, roleList } from "../components.js";
 
 let S = null;
 let C = {};
 let editor = null;
 let charList = null;
+let posCanvas = null;
 let refList = null;
 let vibeList = null;
 let genGalleryEl = null;
@@ -95,6 +96,8 @@ export async function render(container, ctx) {
   row2.append(buildLeftTabs(saved), buildRightPanel());
 
   container.append(row2);
+
+  attachGlobalDrop(container);
 
   await applyModelChange(true);
   // 启动时恢复上次的角色分区 (需在 applyModelChange 之后, 避免被模型切换逻辑清空)
@@ -578,9 +581,11 @@ function buildLeftTabs(saved) {
       { id: "position", label: "📍 位置", type: "position", options: S.app.positions, default: "A1" },
       { id: "enabled", label: "启用", type: "checkbox", default: true },
     ],
-    onChange: () => updateAiChoiceVisibility(),
+    onChange: () => { updateAiChoiceVisibility(); posCanvas?.sync(); },
   });
   charSection.append(charWrap);
+  posCanvas = buildPositionCanvas();
+  posCanvas.mount(charSection);
   bodies[1].append(charSection);
 
   // 3. 角色参考
@@ -917,6 +922,7 @@ async function applyModelChange(initial = false) {
 
   // 角色数量限制: nai5 32, 其余 6 (以官网为准, 动态限制添加按钮)
   charList.setMax?.(nai5 ? 32 : 6);
+  if (posCanvas) posCanvas.setMode?.(nai5);
 
   // 角色位置: nai5 用自由坐标 (X/Y), 其余用 A1-E5 网格坐标
   charList.positionMode?.(nai5 ? "free" : "grid");
@@ -1123,6 +1129,169 @@ export function getLastGeneratedImages() {
 export function getCurrentOutputImage() {
   if (selectedOutputPath) return selectedOutputPath;
   return lastGeneratedImages.length ? lastGeneratedImages[lastGeneratedImages.length - 1] : null;
+}
+
+/** 按当前模型适配导入的角色位置 (V5=自由坐标, 其余=A1-E5 网格) — 精度无损 */
+function applyImportedState(state) {
+  let st = state || {};
+  try {
+    const nai5 = isNai5(C.model.get());
+    if (nai5 && Array.isArray(st.characters) && st.characters.length) {
+      st = {
+        ...st,
+        characters: st.characters.map((c) => ({
+          ...c,
+          position:
+            typeof c.x === "number" && typeof c.y === "number"
+              ? c.x.toFixed(2) + "," + c.y.toFixed(2)
+              : c.position || "0.50,0.50",
+        })),
+      };
+    }
+  } catch { /* 读取模型失败时用原状态 */ }
+  setGenerateState(st);
+}
+
+/** 生成页全局拖放: 拖入图片松开即导入提示词+角色 (不加按钮/入口) */
+let _dropMask = null;
+function attachGlobalDrop(container) {
+  if (!container || _dropMask) return;
+  const mask = el("div", {
+    html: "🖼️ 松开导入提示词",
+    style:
+      "position:fixed;inset:0;z-index:99990;display:none;align-items:center;justify-content:center;" +
+      "background:rgba(0,0,0,.35);backdrop-filter:blur(2px);pointer-events:none;font-size:20px;color:#fff;font-weight:600;",
+  });
+  document.body.appendChild(mask);
+  _dropMask = mask;
+  let depth = 0;
+  // 避开子组件自带的拖放区 (参考图/风格迁移/图生图编辑器/输入框), 交给它们处理
+  const inSub = (t) => t && t.closest && t.closest("textarea, input, select, .img-drop-zone, .ta-box, .file-drop-zone, [data-drop='1']");
+  container.addEventListener("dragover", (e) => {
+    if (inSub(e.target)) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+    depth = 1;
+    mask.style.display = "flex";
+  });
+  container.addEventListener("dragleave", (e) => {
+    if (inSub(e.target)) return;
+    depth = Math.max(0, depth - 1);
+    if (depth <= 0) mask.style.display = "none";
+  });
+  container.addEventListener("drop", async (e) => {
+    if (inSub(e.target)) return;
+    e.preventDefault();
+    mask.style.display = "none";
+    depth = 0;
+    const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+    if (!f) return;
+    if (!/\.(png|jpe?g|webp)$/i.test(f.name)) { toast("仅支持图片(PNG/JPG/WebP)", "warning"); return; }
+    try {
+      const [{ path }] = await uploadFiles([f]);
+      const parsed = await post("/api/pnginfo/to-generate", { image_path: path });
+      if (!parsed || !(parsed.positive_prompt || (parsed.characters && parsed.characters.length))) {
+        toast("未读到该图片的生成参数 (可能被抹除元数据/已转格式), 可到🔮法术解析→图片反推", "warning");
+        return;
+      }
+      applyImportedState(parsed);
+      toast("已导入提示词+角色分区 🌸", "success");
+    } catch (err) {
+      toast("导入失败: " + err.message, "error");
+    }
+  });
+}
+
+/** V5 共享角色位置画布: 拖拽编号圆点自由定位角色 (可选网格线) */
+function posToXY(p) {
+  if (typeof p === "string" && p.includes(",")) {
+    const a = p.split(",").map(Number);
+    return [Number.isFinite(a[0]) ? a[0] : 0.5, Number.isFinite(a[1]) ? a[1] : 0.5];
+  }
+  return [0.5, 0.5];
+}
+function buildPositionCanvas() {
+  const wrap = el("div", { class: "card", style: "margin:0;margin-top:10px;display:none;" });
+  const head = el("div", { class: "card-title", style: "display:flex;align-items:center;gap:10px;" });
+  const title = el("span", { text: "🎨 角色位置" });
+  const hint = el("span", { class: "muted", style: "font-size:12px;", text: "拖动编号圆点设置角色在画面中的位置" });
+  const gridLabel = el("label", { class: "checkline", style: "margin-left:auto;" });
+  const gridCb = el("input", { type: "checkbox" });
+  gridLabel.append(gridCb, document.createTextNode("🕸 网格线"));
+  const doneBtn = el("button", { class: "btn btn-sm", type: "button", text: "✅ 完成位置编辑" });
+  head.append(title, hint, gridLabel, doneBtn);
+  const canvas = el("div", {
+    style: "position:relative;width:100%;aspect-ratio:832/1216;max-height:520px;margin-top:8px;background:rgba(127,127,127,.08);border:1px solid var(--border);border-radius:8px;overflow:hidden;touch-action:none;",
+  });
+  const gridOverlay = el("div", { style: "position:absolute;inset:0;pointer-events:none;display:none;" });
+  canvas.append(gridOverlay);
+  wrap.append(head, canvas);
+  let roles = [];
+  let active = -1;
+  function drawGrid() {
+    gridOverlay.innerHTML = "";
+    for (let i = 1; i < 5; i++) {
+      const v = (i / 5 * 100) + "%";
+      gridOverlay.append(el("div", { style: "position:absolute;left:" + v + ";top:0;bottom:0;width:1px;background:rgba(127,127,127,.3);" }));
+      gridOverlay.append(el("div", { style: "position:absolute;top:" + v + ";left:0;right:0;height:1px;background:rgba(127,127,127,.3);" }));
+    }
+  }
+  function renumber() {
+    canvas.querySelectorAll(".pos-dot").forEach((d) => d.remove());
+    roles.forEach((r, i) => {
+      const dot = el("div", {
+        class: "pos-dot",
+        text: String(i + 1),
+        style: "position:absolute;width:26px;height:26px;border-radius:50%;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;cursor:grab;user-select:none;transform:translate(-50%,-50%);left:" + (r.x * 100) + "%;top:" + (r.y * 100) + "%;box-shadow:0 0 0 2px rgba(0,0,0,.25);",
+      });
+      canvas.append(dot);
+    });
+  }
+  function syncRoles() {
+    const items = charList.getItems() || [];
+    roles = items.map((it, i) => ({ i, x: posToXY(it.position)[0], y: posToXY(it.position)[1], str: it.position || "0.50,0.50" }));
+    renumber();
+  }
+  function toXY(ev) {
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
+    const y = Math.min(1, Math.max(0, (ev.clientY - rect.top) / rect.height));
+    return [x, y];
+  }
+  function start(ev) {
+    const rect = canvas.getBoundingClientRect();
+    const [x, y] = toXY(ev);
+    let best = -1, bd = 900; // 30px^2 命中半径
+    roles.forEach((r, i) => {
+      const dx = (r.x - x) * rect.width, dy = (r.y - y) * rect.height, d = dx * dx + dy * dy;
+      if (d < bd) { bd = d; best = i; }
+    });
+    if (best > -1 && bd < 900) { active = best; ev.preventDefault(); }
+  }
+  canvas.addEventListener("pointerdown", (ev) => { start(ev); });
+  canvas.addEventListener("pointermove", (ev) => {
+    if (active < 0) return;
+    const [x, y] = toXY(ev);
+    roles[active].x = x; roles[active].y = y; roles[active].str = x.toFixed(2) + "," + y.toFixed(2);
+    const dot = canvas.querySelectorAll(".pos-dot")[active];
+    if (dot) { dot.style.left = (x * 100) + "%"; dot.style.top = (y * 100) + "%"; }
+    ev.preventDefault();
+  });
+  window.addEventListener("pointerup", () => { active = -1; });
+  gridCb.addEventListener("change", () => { gridOverlay.style.display = gridCb.checked ? "" : "none"; if (gridCb.checked) drawGrid(); });
+  doneBtn.addEventListener("click", () => {
+    const items = charList.getItems() || [];
+    const count = Math.min(items.length, roles.length);
+    for (let i = 0; i < count; i++) if (roles[i]) items[i].position = roles[i].str;
+    charList.setItems(items);
+    toast("角色位置已更新 🎨", "success");
+  });
+  return {
+    mount: (parent) => { parent.append(wrap); },
+    setMode: (isNai5) => { if (isNai5) { wrap.style.display = ""; syncRoles(); } else { wrap.style.display = "none"; active = -1; } },
+    sync: () => { if (wrap.style.display !== "none") syncRoles(); },
+    destroy: () => { wrap.remove(); },
+  };
 }
 
 export function getC() { return C; }

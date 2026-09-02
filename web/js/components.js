@@ -572,7 +572,30 @@ export function roleList(container, {
         select.value = f.default ?? f.options?.[0] ?? "A1";
         const xInput = el("input", { type: "number", min: 0, max: 1, step: 0.01, value: "0.5" });
         const yInput = el("input", { type: "number", min: 0, max: 1, step: 0.01, value: "0.5" });
-        const gridWrap = el("div", { class: "field" }, [el("label", { text: f.label }), select]);
+        const gridWrap = el("div", { class: "field", style: "position:relative;" }, [el("label", { text: f.label }), select]);
+        // ---- 5×5 可视化点选网格 (V4.x 官网交互, 不止下拉) ----
+        const GRID_LE = ["A", "B", "C", "D", "E"];
+        const gridPicker = el("div", {
+          class: "pos-grid-picker",
+          style:
+            "position:absolute;left:0;top:100%;z-index:120;display:none;grid-template-columns:repeat(5,34px);gap:4px;" +
+            "background:var(--card);border:1px solid var(--border);border-radius:10px;padding:8px;",
+        });
+        for (let rr = 0; rr < 5; rr++) {
+          for (let cc = 0; cc < 5; cc++) {
+            const cell = el("button", {
+              type: "button",
+              class: "pos-grid-cell",
+              text: GRID_LE[cc] + (rr + 1),
+              style: "width:34px;height:34px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:transparent;color:var(--foreground);cursor:pointer;",
+            });
+            cell.addEventListener("click", (e) => { e.stopPropagation(); select.value = cell.textContent; gridPicker.style.display = "none"; });
+            gridPicker.append(cell);
+          }
+        }
+        const gridBtn = el("button", { class: "mini-btn", type: "button", text: "🗖 网格", title: "5×5 点选位置" });
+        gridBtn.addEventListener("click", (e) => { e.stopPropagation(); gridPicker.style.display = gridPicker.style.display === "grid" ? "none" : "grid"; });
+        gridWrap.append(gridBtn, gridPicker);
         const freeWrap = el("div", { class: "field" }, [
           el("label", { text: "📍 位置 X/Y (0-1)" }),
           el("div", { style: "display:flex;gap:6px;" }, [xInput, yInput]),

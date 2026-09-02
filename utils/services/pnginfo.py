@@ -60,6 +60,9 @@ def pnginfo_to_generate(image_path: str) -> dict:
                 "prompt": cap.get("char_caption", ""),
                 "negative_prompt": neg,
                 "position": float_to_position(x, y),
+                # 原始连续坐标 (0-1), 供前端 V5 自由坐标模式精度恢复
+                "x": round(min(1.0, max(0.0, x)), 2),
+                "y": round(min(1.0, max(0.0, y)), 2),
                 "enabled": True,
             }
         )
