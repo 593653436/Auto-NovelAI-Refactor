@@ -35,6 +35,7 @@ let lastOutputPath = null;
 let selectedOutputPath = null; // 多张结果中当前选中的图片 (再次单击取消)
 let lastGeneratedImages = []; // 最近一次生成的全部图片 (供 wildcards 取最后一张做封面)
 let allOutputImages = []; // 本次会话累积生成的全部图片 (左右键查看, 刷新清空)
+let currentViewIdx = 0; // 输出查看器当前浏览的索引 (决定生成后是否跟随跳转)
 
 // ---------------- 控件工厂 ----------------
 
@@ -401,6 +402,7 @@ function buildOutputViewer(container, images, startIdx = 0) {
     mainImg.src = imageUrl(path);
     mainImg.alt = "第 " + (idx + 1) + " / " + images.length + " 张";
     thumbs.forEach((t, i) => t.classList.toggle("active", i === idx));
+    currentViewIdx = idx;
     setOutputSelection(path);
   }
 
@@ -1077,9 +1079,12 @@ function onJobDone(ev) {
   C.generateBtn.disabled = false;
   if (ev.images?.length) {
     lastGeneratedImages = ev.images;
-    const startIdx = allOutputImages.length; // 新图起点 (之前已累积多少张)
+    const oldLen = allOutputImages.length;
+    // 正在看"非最后一张"时不跟随跳转, 停留原图; 停在"最后一张(最新)"时新图出来就跳过去
+    const wasAtEnd = currentViewIdx === oldLen - 1;
     allOutputImages.push(...ev.images);
-    buildOutputViewer(genGalleryEl, allOutputImages, startIdx);  // 累积显示历史+本轮, 定位到新图
+    const startIdx = wasAtEnd ? oldLen : currentViewIdx;
+    buildOutputViewer(genGalleryEl, allOutputImages, startIdx);
   }
   if (ev.message) {
     infoEl.textContent = "✅ " + ev.message;
