@@ -34,6 +34,7 @@ let furryMode = false; // 显式状态, 避免因 Twemoji 替换 DOM 后 textCon
 let lastOutputPath = null;
 let selectedOutputPath = null; // 多张结果中当前选中的图片 (再次单击取消)
 let lastGeneratedImages = []; // 最近一次生成的全部图片 (供 wildcards 取最后一张做封面)
+let allOutputImages = []; // 本次会话累积生成的全部图片 (左右键查看, 刷新清空)
 
 // ---------------- 控件工厂 ----------------
 
@@ -317,16 +318,17 @@ function buildPromptCard(saved) {
   return card;
 }
 /** 构建输出图片查看器: 单图显示 + 左右切换 + 下方缩略图导航 */
-function buildOutputViewer(container, images) {
+function buildOutputViewer(container, images, startIdx = 0) {
   clear(container);
   container.classList.remove("gallery", "count-1", "count-2", "count-3", "count-4");
   container.classList.add("output-viewer");
   if (!images || images.length === 0) {
+    if (container._anrOnKey) { document.removeEventListener("keydown", container._anrOnKey); container._anrOnKey = null; }
     container.append(el("div", { class: "gallery-empty", text: "🌸 还没有图片, 去生成一张吧~" }));
     return;
   }
 
-  let idx = 0;
+  let idx = (Number.isInteger(startIdx) && startIdx >= 0 && startIdx < images.length) ? startIdx : 0;
   const mainImg = el("img", { class: "output-viewer-img", alt: "输出图片" });
   const mainWrap = el("div", { class: "output-viewer-main" });
   const prevBtn = el("button", { class: "output-viewer-nav output-viewer-prev", type: "button", html: "‹", title: "上一张" });
@@ -337,7 +339,7 @@ function buildOutputViewer(container, images) {
   // 缩略图条
   const thumbStrip = el("div", { class: "output-viewer-thumbs" });
   const thumbs = images.map((path, i) => {
-    const t = el("div", { class: "thumb-item" + (i === 0 ? " active" : "") }, [
+    const t = el("div", { class: "thumb-item" + (i === idx ? " active" : "") }, [
       el("img", { src: imageUrl(path), loading: "lazy", alt: "第 " + (i + 1) + " 张" }),
     ]);
     t.addEventListener("click", () => { idx = i; updateView(); });
@@ -402,12 +404,14 @@ function buildOutputViewer(container, images) {
     setOutputSelection(path);
   }
 
-  // 键盘左右键切换
-  document.addEventListener("keydown", function onKey(e) {
+  // 键盘左右键切换 (每次重建先解除旧监听, 只保留最新一个, 避免累积后按键叠加)
+  if (container._anrOnKey) document.removeEventListener("keydown", container._anrOnKey);
+  container._anrOnKey = function onKey(e) {
     if (!container.isConnected) { document.removeEventListener("keydown", onKey); return; }
     if (e.key === "ArrowLeft") { idx = (idx - 1 + images.length) % images.length; updateView(); e.preventDefault(); }
     if (e.key === "ArrowRight") { idx = (idx + 1) % images.length; updateView(); e.preventDefault(); }
-  });
+  };
+  document.addEventListener("keydown", container._anrOnKey);
 
   // 双击主图放大 (显示原图走 工位模式 的 悬停+R 键)
   mainImg.addEventListener("dblclick", async () => {
@@ -1073,7 +1077,9 @@ function onJobDone(ev) {
   C.generateBtn.disabled = false;
   if (ev.images?.length) {
     lastGeneratedImages = ev.images;
-    buildOutputViewer(genGalleryEl, ev.images);  // 内部已选中第一张并显示发送按钮
+    const startIdx = allOutputImages.length; // 新图起点 (之前已累积多少张)
+    allOutputImages.push(...ev.images);
+    buildOutputViewer(genGalleryEl, allOutputImages, startIdx);  // 累积显示历史+本轮, 定位到新图
   }
   if (ev.message) {
     infoEl.textContent = "✅ " + ev.message;
