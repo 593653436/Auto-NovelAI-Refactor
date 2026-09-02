@@ -76,4 +76,4 @@ if __name__ == "__main__":
         threading.Timer(1.5, _open_browser).start()
     # 启动后在终端打印一次访问地址 (只保留一条, 不再输出带版本号的 INFO 日志)
     print(f"WebUI 已启动: http://127.0.0.1:{env.port}")
-    uvicorn.run(app, host="127.0.0.1", port=env.port, log_level="warning")
+    uvicorn.run(app, host=env.host, port=env.port, log_level="warning")
