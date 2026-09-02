@@ -537,6 +537,19 @@ export function roleList(container, {
   onChange = null, // (count) => void, 添加/删除/设置后回调
 }) {
   clear(container);
+  // 角色列表增强样式: 拖拽排序 / 非启用置灰 (仅注入一次)
+  if (!document.querySelector("style[data-rolelist]")) {
+    const st = document.createElement("style");
+    st.setAttribute("data-rolelist", "");
+    st.textContent =
+      ".role-card.role-disabled{opacity:.45;filter:grayscale(.4)}" +
+      ".role-card.role-dragging{opacity:.35;outline:2px dashed var(--accent)}" +
+      ".role-grip{cursor:grab;user-select:none;padding:0 4px;color:var(--muted-foreground)}" +
+      ".role-grip:active{cursor:grabbing}" +
+      ".role-del{border:none;background:transparent;color:var(--muted-foreground);cursor:pointer;padding:0 4px;font-size:13px}" +
+      ".role-del:hover{color:var(--accent)}";
+    document.head.appendChild(st);
+  }
   const items = []; // { card, controls: {id: {get, set}} }
   const state = { count: 0, max };
 
@@ -646,9 +659,12 @@ export function roleList(container, {
   function createItem() {
     const idx = items.length;
     const card = el("div", { class: "role-card", "data-idx": idx });
-    const head = el("div", { class: "role-head" }, [
-      el("span", { class: "role-num", text: `${title} #${idx + 1}` }),
-    ]);
+    const head = el("div", { class: "role-head" });
+    // 拖拽排序手柄
+    const grip = el("span", { class: "role-grip", draggable: true, title: "拖动排序", text: "⠿" });
+    const num = el("span", { class: "role-num", text: `${title} #${idx + 1}` });
+    const delBtn = el("button", { class: "role-del", type: "button", text: "✖", title: "删除该角色" });
+    head.append(grip, num, delBtn);
     const body = el("div", { class: "grid grid-2" });
     const controls = {};
     fields.forEach((f) => {
@@ -670,6 +686,36 @@ export function roleList(container, {
     }
     card.append(head, body);
     items.push({ card, controls });
+
+    // 启用置灰: 取消勾选"启用"时卡片灰显
+    const enabledCtrl = controls["enabled"];
+    function syncEnabled() {
+      const on = enabledCtrl ? !!enabledCtrl.get() : true;
+      card.classList.toggle("role-disabled", !on);
+    }
+    if (enabledCtrl && enabledCtrl.node) {
+      const inp = enabledCtrl.node.querySelector ? enabledCtrl.node.querySelector("input") : null;
+      if (inp) inp.addEventListener("change", syncEnabled);
+    }
+    syncEnabled();
+
+    // 单个删除
+    delBtn.addEventListener("click", (e) => { e.stopPropagation(); removeAt(idx); });
+
+    // 拖拽排序 (手柄拖动)
+    grip.addEventListener("dragstart", (e) => {
+      e.dataTransfer.setData("text/plain", String(idx));
+      e.dataTransfer.effectAllowed = "move";
+      card.classList.add("role-dragging");
+    });
+    grip.addEventListener("dragend", () => card.classList.remove("role-dragging"));
+    card.addEventListener("dragover", (e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; });
+    card.addEventListener("drop", (e) => {
+      e.preventDefault();
+      const src = parseInt(e.dataTransfer.getData("text/plain"), 10);
+      if (!Number.isNaN(src)) moveItem(src, idx);
+    });
+
     return card;
   }
 
@@ -692,21 +738,40 @@ export function roleList(container, {
     });
   }
 
-  function render() {
-    // 先保存当前值, 重建后恢复, 避免添加/删除/限制数量时已填内容丢失
-    const saved = snapshot();
+  function rebuild(saved) {
     clear(container);
     items.length = 0; // 每次重建时清空, 防止重复累积
-    const notify = () => { if (onChange) onChange(state.count); };
     const btnRow = el("div", { style: "display:flex;gap:8px;margin-bottom:10px;" }, [
-      el("button", { class: "btn btn-sm", text: "➕ 添加", onclick: () => { if (state.count < state.max) { state.count++; render(); notify(); } else toast(maxCountMsg || ("最多 " + state.max + " 个"), "warning"); } }),
-      el("button", { class: "btn btn-sm btn-ghost", text: "➖ 删除", onclick: () => { if (state.count > min) { state.count--; render(); notify(); } } }),
+      el("button", { class: "btn btn-sm", text: "➕ 添加", onclick: () => { if (state.count < state.max) { state.count++; rebuild(snapshot()); onChange?.(state.count); } else toast(maxCountMsg || ("最多 " + state.max + " 个"), "warning"); } }),
+      el("button", { class: "btn btn-sm btn-ghost", text: "➖ 删除", onclick: () => { if (state.count > min) { state.count--; rebuild(snapshot()); onChange?.(state.count); } } }),
     ]);
     container.append(btnRow);
     for (let i = 0; i < state.count; i++) {
       container.append(createItem());
     }
-    restore(saved);
+    if (saved) restore(saved);
+  }
+  function render() {
+    // 先保存当前值, 重建后恢复, 避免添加/删除/限制数量时已填内容丢失
+    rebuild(snapshot());
+  }
+  /** 删除第 idx 个角色 (可删任意位置, 不再只能删最后一个) */
+  function removeAt(idx) {
+    if (state.count <= min) return;
+    const saved = snapshot().filter((_, i) => i !== idx);
+    state.count -= 1;
+    rebuild(saved);
+    if (onChange) onChange(state.count);
+  }
+  /** 把第 from 个角色拖到 to 位置 (拖拽排序) */
+  function moveItem(from, to) {
+    if (from === to || from < 0 || to < 0) return;
+    const saved = snapshot();
+    if (from >= saved.length || to >= saved.length) return;
+    const [it] = saved.splice(from, 1);
+    saved.splice(to, 0, it);
+    rebuild(saved);
+    if (onChange) onChange(state.count);
   }
 
   render();
