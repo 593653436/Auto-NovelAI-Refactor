@@ -456,29 +456,8 @@ function renderChat(body) {
       let payload;
       if (imgPath) payload = { image_path: imgPath, prompt: p };
       else payload = { prompt: "从以下 Danbooru tag 中提取我要的内容：\n" + p + "\n\ntag:\n" + tag };
-      // SSE 流式打字机接收
-      const m = el("div", { style: "padding:8px 10px;border-radius:8px;white-space:pre-wrap;background:rgba(76,175,80,.12);" });
-      let acc = "";
-      m.textContent = "🤖 ";
-      log.append(m); log.scrollTop = log.scrollHeight;
-      const res = await fetch("/api/tagger/qwen-chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
-      const reader = res.body.getReader();
-      const dec = new TextDecoder();
-      let buf = "";
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        const parts = buf.split("\n\n");
-        buf = parts.pop();
-        for (const part of parts) {
-          const line = part.split("\n").find((l) => l.startsWith("data:"));
-          if (!line) continue;
-          const data = line.slice(5).trim();
-          if (data === "[DONE]") continue;
-          try { const j = JSON.parse(data); if (j.reply !== undefined) { acc += j.reply; m.textContent = "🤖 " + acc; log.scrollTop = log.scrollHeight; } } catch (e) { /* ignore */ }
-        }
-      }
+      const r = await post("/api/tagger/qwen-chat", payload);
+      addMsg("qwen", r.reply || "(空)");
     } catch (e) {
       addMsg("qwen", "❌ " + e.message);
     } finally { sendBtn.disabled = false; }
