@@ -34,6 +34,7 @@ let furryMode = false; // 显式状态, 避免因 Twemoji 替换 DOM 后 textCon
 let lastOutputPath = null;
 let selectedOutputPath = null; // 多张结果中当前选中的图片 (再次单击取消)
 let genStartViewed = null; // 点"开始生成"瞬间正在看的图 (用于生成后是否跟随跳转)
+let genStartLastPath = null; // 点"开始生成"瞬间 allOutputImages 的最后一张 (并发生成时判定基准)
 let lastGeneratedImages = []; // 最近一次生成的全部图片 (供 wildcards 取最后一张做封面)
 let allOutputImages = []; // 本次会话累积生成的全部图片 (左右键查看, 刷新清空)
 let currentViewIdx = 0; // 输出查看器当前浏览的索引 (决定生成后是否跟随跳转)
@@ -1047,6 +1048,7 @@ async function collectRequest() {
 
 async function onGenerate() {
   genStartViewed = selectedOutputPath; // 记录点击生成瞬间正在看的图
+  genStartLastPath = allOutputImages.length ? allOutputImages[allOutputImages.length - 1] : null; // 记录瞬间的最后一张 (并发基准)
   let request;
   try {
     request = await collectRequest();
@@ -1090,11 +1092,11 @@ function onJobDone(ev) {
     lastGeneratedImages = ev.images;
     const oldLen = allOutputImages.length;
     const oldSel = genStartViewed ?? selectedOutputPath; // 生成瞬间看的图 (优先) / 当前选中图兜底
-    // 正在看的恰好是旧的"最后一张"时, 新图出来后跟随跳到新图; 否则按原图路径停留
-    const wasAtEnd = oldLen > 0 && oldSel === allOutputImages[oldLen - 1];
+    // 用"点生成瞬间的最后一张"判定, 避免多任务并发生成时 allOutputImages 被并发修改导致误判
+    const wasAtEnd = !!genStartLastPath && oldSel === genStartLastPath;
     allOutputImages.push(...ev.images);
     const startIdx = wasAtEnd ? oldLen : Math.max(0, allOutputImages.indexOf(oldSel));
-    console.log("[ANR-debug] onJobDone", JSON.stringify({ oldLen, oldSel, last: allOutputImages[oldLen - 1], wasAtEnd, startIdx, total: allOutputImages.length }));
+    console.log("[ANR-debug] onJobDone", JSON.stringify({ oldLen, oldSel, genStartLastPath, wasAtEnd, startIdx, total: allOutputImages.length }));
     buildOutputViewer(genGalleryEl, allOutputImages, startIdx);
   }
   if (ev.message) {
