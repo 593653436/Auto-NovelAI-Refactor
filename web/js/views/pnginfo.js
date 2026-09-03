@@ -250,6 +250,26 @@ function renderDictBars(container, dict) {
 function renderTagger(body) {
   const picker = imageDropZone({ label: "🖼️ 图片", placeholder: "点击选择或拖入图片", native: true });
   const modelSel = el("select", {}, S.app.tagger_models.map((m) => el("option", { value: m, text: m })));
+  // 反推引擎选择 (仅 0.3 在线时启用 PixAI / Qwen)
+  const engineSel = el("select", {}, [
+    el("option", { value: "wd", text: "WD (HF Space)" }),
+    el("option", { value: "pixai", text: "PixAI v0.9 (0.3)" }),
+    el("option", { value: "qwen", text: "Qwen3-VL (0.3)" }),
+  ]);
+  const statusDot = el("span", { class: "tagger-status", style: "font-size:18px;color:#888;", text: "●" });
+  const statusTxt = el("span", { class: "muted", style: "font-size:12px;", text: "检测中..." });
+  function updateStatus() {
+    fetch("/api/tagger/status").then((r) => r.json()).then((s) => {
+      const on = !!s.online;
+      statusDot.style.color = on ? "#4caf50" : "#888";
+      statusTxt.textContent = on ? "0.3 ComfyUI 在线" : "0.3 离线";
+      [...engineSel.options].forEach((o) => { o.disabled = false; });
+      if (!on) {
+        [...engineSel.options].forEach((o) => { if (o.value === "pixai" || o.value === "qwen") o.disabled = true; });
+      }
+    }).catch(() => { statusDot.style.color = "#888"; statusTxt.textContent = "0.3 离线"; });
+  }
+  updateStatus();
   const genThresh = el("input", { type: "number", min: 0, max: 1, step: 0.05, value: 0.35 });
   const genMcut = el("input", { type: "checkbox" });
   const charThresh = el("input", { type: "number", min: 0, max: 1, step: 0.05, value: 0.85 });
@@ -283,14 +303,23 @@ function renderTagger(body) {
     if (!picker.get()) { toast("请先上传图片", "warning"); return; }
     submitBtn.disabled = true;
     try {
-      const res = await post("/api/tagger", {
-        image_path: picker.get(),
-        model: modelSel.value,
-        general_thresh: Number(genThresh.value),
-        general_mcut: genMcut.checked,
-        character_thresh: Number(charThresh.value),
-        character_mcut: charMcut.checked,
-      });
+      const res = await post("/api/tagger", (() => {
+        const eng = engineSel.value;
+        if (eng === "pixai" || eng === "qwen") {
+          const base = { image_path: picker.get(), engine: eng };
+          if (eng === "qwen") { base.model = "Qwen3VL-8B-Instruct-Q4_K_M.gguf"; base.preset = "🖼️ Simple Description"; }
+          return base;
+        }
+        return {
+          image_path: picker.get(),
+          engine: "wd",
+          model: modelSel.value,
+          general_thresh: Number(genThresh.value),
+          general_mcut: genMcut.checked,
+          character_thresh: Number(charThresh.value),
+          character_mcut: charMcut.checked,
+        };
+      })());
       // Output (string) = Tags 各 tag + Characters 各 tag 按百分数从大到小合并
       const merged = [];
       Object.entries(res.general || {}).forEach(([label, conf]) => merged.push({ label, conf }));
@@ -316,6 +345,8 @@ function renderTagger(body) {
       el("div", { class: "card", style: "margin:0;" }, [
         picker.node,
         el("div", { class: "field" }, [el("label", { text: "Model" }), modelSel]),
+        el("div", { class: "field" }, [el("label", { text: "🖥️ 反推引擎" }), engineSel]),
+        el("div", { class: "field", style: "display:flex;align-items:center;gap:6px;" }, [statusDot, statusTxt]),
         el("div", { class: "grid grid-2" }, [
           el("div", { class: "field" }, [el("label", { text: "General Tags Threshold" }), genThresh]),
           el("label", { class: "checkline", style: "align-self:end;" }, [genMcut, document.createTextNode("Use MCut")]),

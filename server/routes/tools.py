@@ -111,6 +111,24 @@ async def run_tagger(payload: dict):
     image_path = payload.get("image_path")
     if not image_path:
         raise HTTPException(status_code=400, detail="请先上传图片")
+    engine = payload.get("engine", "wd")
+    # ---- 0.3 ComfyUI 反推 (PixAI Tagger v0.9 / Qwen3-VL) ----
+    if engine in ("pixai", "qwen"):
+        from utils.services import comfyui_tagger
+
+        try:
+            if engine == "pixai":
+                out = comfyui_tagger.pixai_tagger(image_path)
+            else:
+                out = comfyui_tagger.qwen_vl(
+                    image_path,
+                    payload.get("model", "Qwen3VL-8B-Instruct-Q4_K_M.gguf"),
+                    payload.get("preset", "🖼️ Simple Description"),
+                )
+            return {"string": out, "rating": {}, "characters": {}, "general": {}}
+        except Exception as e:
+            logger.error(f"0.3 反推失败: {e}")
+            raise HTTPException(status_code=500, detail=f"0.3 反推失败: {e}")
     try:
         string, rating, characters, general = tagger.tagger(
             image_path,
@@ -129,6 +147,14 @@ async def run_tagger(payload: dict):
     except Exception as e:
         logger.error(f"反推失败: {e}")
         raise HTTPException(status_code=500, detail=f"反推失败: {e}")
+
+
+@router.get("/tagger/status")
+async def tagger_status():
+    """0.3 ComfyUI 在线状态 (反推页指示灯)。"""
+    from utils.services import comfyui_tagger
+
+    return {"online": comfyui_tagger.online()}
 
 
 # ---------------------------------------------------------------- 图片筛选
