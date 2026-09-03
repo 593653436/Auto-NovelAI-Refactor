@@ -120,8 +120,10 @@ def _clean_text(s) -> str:
     return s.strip().strip('"').strip("'")
 
 
-def qwen_vl(image_path: str, model: str = "Qwen3VL-8B-Instruct-Q4_K_M.gguf", preset: str = "🖼️ Simple Description") -> str:
-    """Qwen3-VL (AILab_QwenVL_GGUF 从本地 GGUF 加载, 不联网) 反推 -> 描述文本。"""
+def qwen_vl(image_path: str, model: str = "Qwen3VL-8B-Instruct-Q4_K_M.gguf", preset: str = "🖼️ Simple Description", custom_prompt: str = "") -> str:
+    """Qwen3-VL (AILab_QwenVL_GGUF 本地 GGUF) 反推/对话。
+    - custom_prompt 非空时用它(用户自定义提示词/提问), 否则用 preset 预设模板。
+    """
     name = _upload(image_path)
     prompt = {
         "1": {"class_type": "LoadImage", "inputs": {"image": name}},
@@ -131,7 +133,7 @@ def qwen_vl(image_path: str, model: str = "Qwen3VL-8B-Instruct-Q4_K_M.gguf", pre
                 "image": ["1", 0],
                 "model_name": model,
                 "preset_prompt": preset,
-                "custom_prompt": "",
+                "custom_prompt": custom_prompt,
                 "max_tokens": 512,
                 "keep_model_loaded": True,
                 "seed": 1,

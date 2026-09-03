@@ -23,6 +23,7 @@ export async function render(container, ctx) {
   renderTabs([
     { title: "📖 读取信息", render: renderRead },
     { title: "🏷️ 图片反推", render: renderTagger },
+    { title: "💬 Qwen 对话", render: renderChat },
     { title: "🧼 抹除数据", render: renderRemove },
   ], tabsWrap);
 }
@@ -424,6 +425,40 @@ function renderRemove(body) {
       ]),
     ])
   );
+}
+
+// ---------------- Qwen3-VL 对话 ----------------
+
+function renderChat(body) {
+  const picker = imageDropZone({ label: "🖼️ 对话图片", placeholder: "点击选择或拖入图片 (Qwen3-VL 基于此图回答)", native: true });
+  const hint = el("div", { class: "muted", style: "font-size:12px;margin-top:6px;", text: "示例提问：提取人物 / 提取画风 / 描述动作 / 列出服装细节 / 识别这一角色的特征" });
+  const log = el("div", { style: "margin-top:12px;max-height:320px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:10px;background:var(--input);border-radius:8px;" });
+  const input = el("textarea", { rows: 2, placeholder: "输入问题，Enter 发送 (Shift+Enter 换行)" });
+  const sendBtn = el("button", { class: "btn btn-primary btn-sm", text: "发送" });
+  function addMsg(role, text) {
+    const m = el("div", { style: "padding:8px 10px;border-radius:8px;white-space:pre-wrap;" });
+    m.textContent = (role === "qwen" ? "🤖 " : "🧑 ") + text;
+    m.style.background = role === "user" ? "rgba(127,127,127,.15)" : "rgba(76,175,80,.12)";
+    log.append(m);
+    log.scrollTop = log.scrollHeight;
+  }
+  async function send() {
+    const p = input.value.trim();
+    if (!p) { toast("请先输入问题", "warning"); return; }
+    if (!picker.get()) { toast("请先上传图片", "warning"); return; }
+    addMsg("user", p);
+    input.value = "";
+    sendBtn.disabled = true;
+    try {
+      const r = await post("/api/tagger/qwen-chat", { image_path: picker.get(), prompt: p });
+      addMsg("qwen", r.reply || "(空)");
+    } catch (e) {
+      addMsg("qwen", "❌ " + e.message);
+    } finally { sendBtn.disabled = false; }
+  }
+  sendBtn.addEventListener("click", send);
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
+  body.append(picker.node, hint, log, el("div", { style: "display:flex;gap:8px;margin-top:10px;" }, [input, sendBtn]));
 }
 
 export function onShow() {}

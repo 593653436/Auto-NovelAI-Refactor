@@ -157,6 +157,27 @@ async def tagger_status():
     return {"online": comfyui_tagger.online()}
 
 
+@router.post("/tagger/qwen-chat")
+async def qwen_chat(payload: dict):
+    """与 Qwen3-VL 对话: 上传图 + 提问 -> 回答 (提取人物/风格/动作等)。"""
+    image_path = payload.get("image_path")
+    if not image_path:
+        raise HTTPException(status_code=400, detail="请先上传图片")
+    from utils.services import comfyui_tagger
+
+    try:
+        out = comfyui_tagger.qwen_vl(
+            image_path,
+            payload.get("model", "Qwen3VL-8B-Instruct-Q4_K_M.gguf"),
+            "🖼️ Simple Description",
+            payload.get("prompt", ""),
+        )
+        return {"reply": out}
+    except Exception as e:
+        logger.error(f"Qwen 对话失败: {e}")
+        raise HTTPException(status_code=500, detail=f"Qwen 对话失败: {e}")
+
+
 # ---------------------------------------------------------------- 图片筛选
 
 
