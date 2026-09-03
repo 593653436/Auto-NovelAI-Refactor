@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 
 from src.director_tools import run_director
 from src.upscale_images import run_upscale
@@ -159,24 +160,35 @@ async def tagger_status():
 
 @router.post("/tagger/qwen-chat")
 async def qwen_chat(payload: dict):
-    """与 Qwen3-VL 对话: 图 + 提问, 或 纯文本(tag) + 提取要求 -> 回答。"""
+    """与 Qwen3-VL 对话: 图 + 提问 或 纯文本(tag) + 提取 -> SSE 流式回答(打字机)。"""
     image_path = payload.get("image_path")
     prompt = payload.get("prompt", "")
     if not prompt:
         raise HTTPException(status_code=400, detail="请输入问题/文本")
     from utils.services import comfyui_tagger
+    import ujson
 
-    try:
-        out = comfyui_tagger.qwen_vl(
-            image_path or None,  # 无图=纯文本模式 (Qwen 从 tag/文本提取)
-            payload.get("model", "Qwen3VL-8B-Instruct-Q4_K_M.gguf"),
-            "🖼️ Simple Description",
-            prompt,
-        )
-        return {"reply": out}
-    except Exception as e:
-        logger.error(f"Qwen 对话失败: {e}")
-        raise HTTPException(status_code=500, detail=f"Qwen 对话失败: {e}")
+    def gen():
+        try:
+            reply = comfyui_tagger.qwen_vl(
+                image_path or None,
+                payload.get("model", "Qwen3VL-8B-Instruct-Q4_K_M.gguf"),
+                "🖼️ Simple Description",
+                prompt,
+            )
+        except Exception as e:
+            yield "data: " + ujson.dumps({"reply": "❌ " + str(e)}, ensure_ascii=False) + "\n\n"
+            yield "data: [DONE]\n\n"
+            return
+        # 结果流式打字机 (ComfyUI 节点整体出结果, 这里拆小块模拟流式显示)
+        import time
+        step = 3
+        for i in range(0, len(reply), step):
+            yield "data: " + ujson.dumps({"reply": reply[i:i + step]}, ensure_ascii=False) + "\n\n"
+            time.sleep(0.012)
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 # ---------------------------------------------------------------- 图片筛选
