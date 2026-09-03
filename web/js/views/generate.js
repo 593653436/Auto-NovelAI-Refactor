@@ -33,6 +33,7 @@ let furryBtn = null;
 let furryMode = false; // 显式状态, 避免因 Twemoji 替换 DOM 后 textContent 不含 emoji 导致检测失败
 let lastOutputPath = null;
 let selectedOutputPath = null; // 多张结果中当前选中的图片 (再次单击取消)
+let genStartViewed = null; // 点"开始生成"瞬间正在看的图 (用于生成后是否跟随跳转)
 let lastGeneratedImages = []; // 最近一次生成的全部图片 (供 wildcards 取最后一张做封面)
 let allOutputImages = []; // 本次会话累积生成的全部图片 (左右键查看, 刷新清空)
 let currentViewIdx = 0; // 输出查看器当前浏览的索引 (决定生成后是否跟随跳转)
@@ -1045,6 +1046,7 @@ async function collectRequest() {
 }
 
 async function onGenerate() {
+  genStartViewed = selectedOutputPath; // 记录点击生成瞬间正在看的图
   let request;
   try {
     request = await collectRequest();
@@ -1087,11 +1089,12 @@ function onJobDone(ev) {
   if (ev.images?.length) {
     lastGeneratedImages = ev.images;
     const oldLen = allOutputImages.length;
-    const oldSel = selectedOutputPath; // 生成前正在查看的图
+    const oldSel = genStartViewed ?? selectedOutputPath; // 生成瞬间看的图 (优先) / 当前选中图兜底
     // 正在看的恰好是旧的"最后一张"时, 新图出来后跟随跳到新图; 否则按原图路径停留
     const wasAtEnd = oldLen > 0 && oldSel === allOutputImages[oldLen - 1];
     allOutputImages.push(...ev.images);
     const startIdx = wasAtEnd ? oldLen : Math.max(0, allOutputImages.indexOf(oldSel));
+    console.log("[ANR-debug] onJobDone", JSON.stringify({ oldLen, oldSel, last: allOutputImages[oldLen - 1], wasAtEnd, startIdx, total: allOutputImages.length }));
     buildOutputViewer(genGalleryEl, allOutputImages, startIdx);
   }
   if (ev.message) {
