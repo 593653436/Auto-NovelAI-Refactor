@@ -430,8 +430,9 @@ function renderRemove(body) {
 // ---------------- Qwen3-VL 对话 ----------------
 
 function renderChat(body) {
-  const picker = imageDropZone({ label: "🖼️ 对话图片", placeholder: "点击选择或拖入图片 (Qwen3-VL 基于此图回答)", native: true });
-  const hint = el("div", { class: "muted", style: "font-size:12px;margin-top:6px;", text: "示例提问：提取人物 / 提取画风 / 描述动作 / 列出服装细节 / 识别这一角色的特征" });
+  const picker = imageDropZone({ label: "🖼️ 对话图片 (可选)", placeholder: "点击选择或拖入图片 (也可不传, 用下方 tag 文本)", native: true });
+  const tagInput = el("textarea", { rows: 3, placeholder: "📝 WD 反推的 tag / 文本 (可选): 例如 1girl, hikari_(blue_archive), standing, pleated_skirt ...", style: "margin-top:10px;" });
+  const hint = el("div", { class: "muted", style: "font-size:12px;margin-top:6px;", text: "有图→基于图回答；无图只有 tag→从 tag 提取。例：提取人物 / 画风 / 动作 / 服装" });
   const log = el("div", { style: "margin-top:12px;max-height:320px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:10px;background:var(--input);border-radius:8px;" });
   const input = el("textarea", { rows: 2, placeholder: "输入问题，Enter 发送 (Shift+Enter 换行)" });
   const sendBtn = el("button", { class: "btn btn-primary btn-sm", text: "发送" });
@@ -445,12 +446,17 @@ function renderChat(body) {
   async function send() {
     const p = input.value.trim();
     if (!p) { toast("请先输入问题", "warning"); return; }
-    if (!picker.get()) { toast("请先上传图片", "warning"); return; }
-    addMsg("user", p);
+    const imgPath = picker.get();
+    const tag = tagInput.value.trim();
+    if (!imgPath && !tag) { toast("请上传图片 或 填入 tag 文本", "warning"); return; }
+    addMsg("user", p + (tag ? "\n[tag] " + tag.slice(0, 500) : ""));
     input.value = "";
     sendBtn.disabled = true;
     try {
-      const r = await post("/api/tagger/qwen-chat", { image_path: picker.get(), prompt: p });
+      let payload;
+      if (imgPath) payload = { image_path: imgPath, prompt: p };
+      else payload = { prompt: "从以下 Danbooru tag 中提取我要的内容：\n" + p + "\n\ntag:\n" + tag };
+      const r = await post("/api/tagger/qwen-chat", payload);
       addMsg("qwen", r.reply || "(空)");
     } catch (e) {
       addMsg("qwen", "❌ " + e.message);
@@ -458,7 +464,7 @@ function renderChat(body) {
   }
   sendBtn.addEventListener("click", send);
   input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
-  body.append(picker.node, hint, log, el("div", { style: "display:flex;gap:8px;margin-top:10px;" }, [input, sendBtn]));
+  body.append(picker.node, tagInput, hint, log, el("div", { style: "display:flex;gap:8px;margin-top:10px;" }, [input, sendBtn]));
 }
 
 export function onShow() {}

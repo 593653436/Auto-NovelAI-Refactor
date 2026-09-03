@@ -120,25 +120,23 @@ def _clean_text(s) -> str:
     return s.strip().strip('"').strip("'")
 
 
-def qwen_vl(image_path: str, model: str = "Qwen3VL-8B-Instruct-Q4_K_M.gguf", preset: str = "🖼️ Simple Description", custom_prompt: str = "") -> str:
+def qwen_vl(image_path: str | None = None, model: str = "Qwen3VL-8B-Instruct-Q4_K_M.gguf", preset: str = "🖼️ Simple Description", custom_prompt: str = "") -> str:
     """Qwen3-VL (AILab_QwenVL_GGUF 本地 GGUF) 反推/对话。
-    - custom_prompt 非空时用它(用户自定义提示词/提问), 否则用 preset 预设模板。
+    - 传 image_path: 基于图片; 不传: 纯文本(custom_prompt 为 tag/文本+要求)。
+    - custom_prompt 非空时用它(自定义提示词/提问), 否则用 preset 预设。
     """
-    name = _upload(image_path)
-    prompt = {
-        "1": {"class_type": "LoadImage", "inputs": {"image": name}},
-        "2": {
-            "class_type": "AILab_QwenVL_GGUF",
-            "inputs": {
-                "image": ["1", 0],
-                "model_name": model,
-                "preset_prompt": preset,
-                "custom_prompt": custom_prompt,
-                "max_tokens": 512,
-                "keep_model_loaded": True,
-                "seed": 1,
-            },
-        },
-        "3": {"class_type": "PreviewAny", "inputs": {"source": ["2", 0]}},
+    node_inputs = {
+        "model_name": model,
+        "preset_prompt": preset,
+        "custom_prompt": custom_prompt,
+        "max_tokens": 512,
+        "keep_model_loaded": True,
+        "seed": 1,
     }
+    if image_path:
+        name = _upload(image_path)
+        node_inputs["image"] = ["1", 0]
+        prompt = {"1": {"class_type": "LoadImage", "inputs": {"image": name}}, "2": {"class_type": "AILab_QwenVL_GGUF", "inputs": node_inputs}, "3": {"class_type": "PreviewAny", "inputs": {"source": ["2", 0]}}}
+    else:
+        prompt = {"2": {"class_type": "AILab_QwenVL_GGUF", "inputs": node_inputs}, "3": {"class_type": "PreviewAny", "inputs": {"source": ["2", 0]}}}
     return _clean_text(_run(prompt))
