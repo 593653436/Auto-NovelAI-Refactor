@@ -120,16 +120,17 @@ def _clean_text(s) -> str:
     return s.strip().strip('"').strip("'")
 
 
-def qwen_vl(image_path: str | None = None, model: str = "Gliese-Qwen3.5-9B-Abliterated-Caption.Q4_K_M.gguf", preset: str = "🖼️ Simple Description", custom_prompt: str = "") -> str:
-    """Qwen3-VL (AILab_QwenVL_GGUF 本地 GGUF) 反推/对话。
+def qwen_vl(image_path: str | None = None, model: str = "Gliese-Qwen3.5-9B-Abliterated-Caption.Q4_K_M.gguf", preset: str = "🖼️ Simple Description", custom_prompt: str = "", max_tokens: int = 2048) -> str:
+    """Qwen3.5 caption (AILab_QwenVL_GGUF 本地 GGUF) 反推/对话。
     - 传 image_path: 基于图片; 不传: 纯文本(custom_prompt 为 tag/文本+要求)。
     - custom_prompt 非空时用它(自定义提示词/提问), 否则用 preset 预设。
+    - max_tokens 默认拉到节点上限 2048 (思考+正文), 避免被思考过程截断。
     """
     node_inputs = {
         "model_name": model,
         "preset_prompt": preset,
         "custom_prompt": custom_prompt,
-        "max_tokens": 512,
+        "max_tokens": max_tokens,
         "keep_model_loaded": True,
         "seed": 1,
     }

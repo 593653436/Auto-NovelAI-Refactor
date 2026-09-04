@@ -435,6 +435,11 @@ function renderChat(body) {
   const hint = el("div", { class: "muted", style: "font-size:12px;margin-top:6px;", text: "有图→基于图回答；无图只有 tag→从 tag 提取。例：提取人物 / 画风 / 动作 / 服装" });
   const log = el("div", { style: "margin-top:12px;max-height:320px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:10px;background:var(--input);border-radius:8px;" });
   const input = el("textarea", { rows: 2, placeholder: "输入问题，Enter 发送 (Shift+Enter 换行)" });
+  const modelLabel = el("label", { class: "muted", style: "font-size:12px;margin-right:6px;", text: "🧠 模型:" });
+  const modelSel = el("select", { style: "max-width:290px;" }, [
+    el("option", { value: "Gliese-Qwen3.5-9B-Abliterated-Caption.Q4_K_M.gguf", text: "🎞 Gliese caption (图像描述)" }),
+    el("option", { value: "Qwen3VL-8B-Instruct-Q4_K_M.gguf", text: "📝 Qwen3-VL-8B (tag提取/问答)" }),
+  ]);
   const sendBtn = el("button", { class: "btn btn-primary btn-sm", text: "发送" });
   function addMsg(role, text) {
     const m = el("div", { style: "padding:8px 10px;border-radius:8px;white-space:pre-wrap;" });
@@ -454,8 +459,9 @@ function renderChat(body) {
     sendBtn.disabled = true;
     try {
       let payload;
-      if (imgPath) payload = { image_path: imgPath, prompt: p };
-      else payload = { prompt: "从以下 Danbooru tag 中提取我要的内容：\n" + p + "\n\ntag:\n" + tag };
+      const mdl = modelSel.value;
+      if (imgPath) payload = { image_path: imgPath, prompt: p, model: mdl };
+      else payload = { prompt: "从以下 Danbooru tag 中提取我要的内容：\n" + p + "\n\ntag:\n" + tag, model: mdl };
       const r = await post("/api/tagger/qwen-chat", payload);
       addMsg("qwen", r.reply || "(空)");
     } catch (e) {
@@ -464,7 +470,7 @@ function renderChat(body) {
   }
   sendBtn.addEventListener("click", send);
   input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
-  body.append(picker.node, tagInput, hint, log, el("div", { style: "display:flex;gap:8px;margin-top:10px;" }, [input, sendBtn]));
+  body.append(picker.node, tagInput, hint, el("div", { style: "margin-top:8px;display:flex;align-items:center;gap:4px;" }, [modelLabel, modelSel]), log, el("div", { style: "display:flex;gap:8px;margin-top:10px;" }, [input, sendBtn]));
 }
 
 export function onShow() {}
