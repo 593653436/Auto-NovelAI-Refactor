@@ -308,7 +308,7 @@ function renderTagger(body) {
         const eng = engineSel.value;
         if (eng === "pixai" || eng === "qwen") {
           const base = { image_path: picker.get(), engine: eng };
-          if (eng === "qwen") { base.model = "Qwen3VL-8B-Instruct-Q4_K_M.gguf"; base.preset = "🖼️ Simple Description"; }
+          if (eng === "qwen") { base.model = "Gliese-Qwen3.5-9B-Abliterated-Caption.Q4_K_M.gguf"; base.preset = "🖼️ Simple Description"; }
           return base;
         }
         return {

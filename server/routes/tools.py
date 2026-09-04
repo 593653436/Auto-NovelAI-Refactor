@@ -122,7 +122,7 @@ async def run_tagger(payload: dict):
             else:
                 out = comfyui_tagger.qwen_vl(
                     image_path,
-                    payload.get("model", "Qwen3VL-8B-Instruct-Q4_K_M.gguf"),
+                    payload.get("model", "Gliese-Qwen3.5-9B-Abliterated-Caption.Q4_K_M.gguf"),
                     payload.get("preset", "🖼️ Simple Description"),
                 )
             return {"string": out, "rating": {}, "characters": {}, "general": {}}
@@ -169,7 +169,7 @@ async def qwen_chat(payload: dict):
     try:
         out = comfyui_tagger.qwen_vl(
             image_path or None,
-            payload.get("model", "Qwen3VL-8B-Instruct-Q4_K_M.gguf"),
+            payload.get("model", "Gliese-Qwen3.5-9B-Abliterated-Caption.Q4_K_M.gguf"),
             "🖼️ Simple Description",
             prompt,
         )

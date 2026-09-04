@@ -120,7 +120,7 @@ def _clean_text(s) -> str:
     return s.strip().strip('"').strip("'")
 
 
-def qwen_vl(image_path: str | None = None, model: str = "Qwen3VL-8B-Instruct-Q4_K_M.gguf", preset: str = "🖼️ Simple Description", custom_prompt: str = "") -> str:
+def qwen_vl(image_path: str | None = None, model: str = "Gliese-Qwen3.5-9B-Abliterated-Caption.Q4_K_M.gguf", preset: str = "🖼️ Simple Description", custom_prompt: str = "") -> str:
     """Qwen3-VL (AILab_QwenVL_GGUF 本地 GGUF) 反推/对话。
     - 传 image_path: 基于图片; 不传: 纯文本(custom_prompt 为 tag/文本+要求)。
     - custom_prompt 非空时用它(自定义提示词/提问), 否则用 preset 预设。
