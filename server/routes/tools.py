@@ -159,24 +159,53 @@ async def tagger_status():
 
 @router.post("/tagger/qwen-chat")
 async def qwen_chat(payload: dict):
-    """与 Qwen3-VL 对话: 图 + 提问 或 纯文本(tag) + 提取 -> 回答 (一次性返回)。"""
+    """Qwen 对话/提取: 有图→ComfyUI Gliese 图描述; 无图(tag)→qwen35 server 流式提取(无审查+思考)。"""
     image_path = payload.get("image_path")
     prompt = payload.get("prompt", "")
     if not prompt:
         raise HTTPException(status_code=400, detail="请输入问题/文本")
-    from utils.services import comfyui_tagger
+    if image_path:
+        # 有图: ComfyUI Gliese 图描述 (已验证正常)
+        from utils.services import comfyui_tagger
+        try:
+            out = comfyui_tagger.qwen_vl(
+                image_path,
+                payload.get("model", "Gliese-Qwen3.5-9B-Abliterated-Caption.Q4_K_M.gguf"),
+                "🖼️ Simple Description",
+                prompt,
+            )
+            return {"reply": out}
+        except Exception as e:
+            logger.error(f"Qwen 图对话失败: {e}")
+            raise HTTPException(status_code=500, detail=f"Qwen 图对话失败: {e}")
+    # 无图: tag 提取 → qwen35 transformers server (无审查, 流式, 思考)
+    import json as _json
+    from fastapi.responses import StreamingResponse
+    import httpx
 
-    try:
-        out = comfyui_tagger.qwen_vl(
-            image_path or None,
-            payload.get("model", "Gliese-Qwen3.5-9B-Abliterated-Caption.Q4_K_M.gguf"),
-            "🖼️ Simple Description",
-            prompt,
-        )
-        return {"reply": out}
-    except Exception as e:
-        logger.error(f"Qwen 对话失败: {e}")
-        raise HTTPException(status_code=500, detail=f"Qwen 对话失败: {e}")
+    max_tokens = payload.get("max_tokens", 700)
+
+    async def gen():
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(600, connect=25)) as c:
+                async with c.stream(
+                    "POST",
+                    "http://192.168.0.3:8091/v1/chat/completions",
+                    json={"messages": [{"role": "user", "content": prompt}], "stream": True, "max_tokens": max_tokens},
+                ) as r:
+                    if r.status_code != 200:
+                        yield "data: " + _json.dumps({"delta": {"content": "❌ qwen35 server %s" % r.status_code}}, ensure_ascii=False) + "\n\n"
+                        yield "data: [DONE]\n\n"
+                        return
+                    async for line in r.aiter_lines():
+                        if line:
+                            yield line + "\n"
+        except Exception as e:
+            logger.error(f"qwen35 server 提取失败: {e}")
+            yield "data: " + _json.dumps({"delta": {"content": "❌ " + str(e)}}, ensure_ascii=False) + "\n\n"
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 # ---------------------------------------------------------------- 图片筛选

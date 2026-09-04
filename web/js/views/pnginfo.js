@@ -453,20 +453,53 @@ function renderChat(body) {
     if (!p) { toast("请先输入问题", "warning"); return; }
     const imgPath = picker.get();
     const tag = tagInput.value.trim();
-    if (!imgPath && !tag) { toast("请上传图片 或 填入 tag 文本", "warning"); return; }
+    if (!imgPath && !tag) { toast("请先上传图片 或 填入 tag 文本", "warning"); return; }
     addMsg("user", p + (tag ? "\n[tag] " + tag.slice(0, 500) : ""));
     input.value = "";
     sendBtn.disabled = true;
     try {
-      let payload;
-      const mdl = modelSel.value;
-      if (imgPath) payload = { image_path: imgPath, prompt: p, model: mdl };
-      else payload = { prompt: "从以下 Danbooru tag 中提取我要的内容：\n" + p + "\n\ntag:\n" + tag, model: mdl };
-      const r = await post("/api/tagger/qwen-chat", payload);
-      addMsg("qwen", r.reply || "(空)");
+      const payload = imgPath
+        ? { image_path: imgPath, prompt: p, model: modelSel.value }
+        : { prompt: (tag ? p + "\n\n基于以下 Danbooru tag，提取【人物】【动作】【服装】等，直接简洁输出：\n" + tag : p), max_tokens: 700 };
+      if (imgPath) {
+        const r = await post("/api/tagger/qwen-chat", payload);
+        addMsg("qwen", r.reply || "(空)");
+      } else {
+        await streamChat(payload);
+      }
     } catch (e) {
       addMsg("qwen", "❌ " + e.message);
     } finally { sendBtn.disabled = false; }
+  }
+  const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  async function streamChat(payload) {
+    const m = el("div", { style: "padding:8px 10px;border-radius:8px;background:rgba(76,175,80,.12);" });
+    let acc = "";
+    const render = () => {
+      const ti = acc.search(/Thinking Process|思考过程|<thinking>|\*\*\*/i);
+      let think = "", body = acc;
+      if (ti >= 0) { think = acc.slice(0, ti + 18); body = acc.slice(ti + 18); }
+      m.innerHTML = "🤖 " + (think
+        ? `<details style="margin:2px 0;"><summary style="cursor:pointer;color:var(--muted-foreground);font-size:12px;">🧠 思考</summary><div class="muted" style="font-size:12px;white-space:pre-wrap;">${esc(think)}</div></details><div style="margin-top:4px;white-space:pre-wrap;">${esc(body)}</div>`
+        : `<div style="white-space:pre-wrap;">${esc(body)}</div>`);
+      log.scrollTop = log.scrollHeight;
+    };
+    log.append(m); render();
+    const res = await fetch("/api/tagger/qwen-chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    const reader = res.body.getReader(); const dec = new TextDecoder(); let buf = "";
+    while (true) {
+      const { done, value } = await reader.read(); if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const parts = buf.split("\n\n"); buf = parts.pop();
+      for (const part of parts) {
+        const line = part.split("\n").find((l) => l.startsWith("data:"));
+        if (!line) continue;
+        const d = line.slice(5).trim();
+        if (d === "[DONE]") continue;
+        try { const j = JSON.parse(d); const c = j.choices && j.choices[0] && j.choices[0].delta ? j.choices[0].delta.content : ""; if (c) { acc += c; render(); } } catch (e) { /* ignore */ }
+      }
+    }
+    render();
   }
   sendBtn.addEventListener("click", send);
   input.addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } });
