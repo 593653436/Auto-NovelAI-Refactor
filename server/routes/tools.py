@@ -183,7 +183,7 @@ async def qwen_chat(payload: dict):
     from fastapi.responses import StreamingResponse
     import httpx
 
-    max_tokens = payload.get("max_tokens", 700)
+    max_tokens = payload.get("max_tokens", 2048)
 
     async def gen():
         try:
