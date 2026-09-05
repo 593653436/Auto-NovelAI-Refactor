@@ -436,7 +436,7 @@ function renderChat(body) {
   const log = el("div", { style: "margin-top:12px;max-height:320px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:10px;background:var(--input);border-radius:8px;" });
   const input = el("textarea", { rows: 2, placeholder: "输入问题，Enter 发送 (Shift+Enter 换行)" });
   const modelLabel = el("label", { class: "muted", style: "font-size:12px;margin-right:6px;", text: "🎞 图描述模型:" });
-  const modelSel = el("select", { style: "max-width:290px;" }, [
+  const modelSel = el("select", { style: "max-width:290px;", value: "Gliese-Qwen3.5-9B-Abliterated-Caption.Q4_K_M.gguf" }, [
     el("option", { value: "Gliese-Qwen3.5-9B-Abliterated-Caption.Q4_K_M.gguf", text: "🎞 Gliese caption (图像描述)" }),
     el("option", { value: "Qwen3VL-8B-Instruct-Q4_K_M.gguf", text: "📝 Qwen3-VL-8B (tag提取/问答)" }),
   ]);
