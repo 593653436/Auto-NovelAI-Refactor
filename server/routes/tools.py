@@ -199,7 +199,7 @@ async def qwen_chat(payload: dict):
                         return
                     async for line in r.aiter_lines():
                         if line:
-                            yield line + "\n"
+                            yield line + "\n\n"
         except Exception as e:
             logger.error(f"qwen35 server 提取失败: {e}")
             yield "data: " + _json.dumps({"delta": {"content": "❌ " + str(e)}}, ensure_ascii=False) + "\n\n"
