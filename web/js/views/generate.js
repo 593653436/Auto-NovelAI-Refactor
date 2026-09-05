@@ -92,6 +92,14 @@ export async function render(container, ctx) {
   const modelBar = el("div", { class: "model-bar", style: "position:sticky;top:0;z-index:60;background:var(--card);" });
   buildModelBar(modelBar, saved);
   container.append(modelBar);
+  // 导入 NovelAI 请求体 JSON (文件选择)
+  const importReqBtn = el("button", { class: "btn btn-sm", style: "margin:4px 6px;", text: "📥 导入 NovelAI 请求(.json)" });
+  importReqBtn.addEventListener("click", () => {
+    const inp = el("input", { type: "file", accept: ".json,application/json", style: "display:none" });
+    inp.onchange = async () => { const f = inp.files && inp.files[0]; if (f) { try { importNovelAIRequest(JSON.parse(await f.text())); } catch (e) { toast("JSON 解析失败: " + e.message, "error"); } } };
+    inp.click();
+  });
+  container.append(importReqBtn);
 
   container.append(buildPromptCard(saved));
 
@@ -1222,7 +1230,12 @@ function attachGlobalDrop(container) {
     mask.style.display = "none";
     depth = 0;
     const f = e.dataTransfer.files[0];
-    if (!/\.(png|jpe?g|webp)$/i.test(f.name)) { toast("仅支持图片(PNG/JPG/WebP)", "warning"); return; }
+    if (/\.json$/i.test(f.name)) {
+      try { const txt = await f.text(); importNovelAIRequest(JSON.parse(txt)); }
+      catch (err) { toast("JSON 解析失败: " + err.message, "error"); }
+      return;
+    }
+    if (!/\.(png|jpe?g|webp)$/i.test(f.name)) { toast("仅支持图片(PNG/JPG/WebP) 或 .json 请求体", "warning"); return; }
     try {
       const [{ path }] = await uploadFiles([f]);
       const parsed = await post("/api/pnginfo/to-generate", { image_path: path });
@@ -1357,4 +1370,34 @@ export function setGenerateState(state) {
       enabled: !!c.enabled,
     })));
   }
+}
+
+/** 导入 NovelAI 网页导出的请求体 JSON (如 {input, model, parameters{v4_prompt, characterPrompts, width,height,scale,steps,seed,sampler,negative_prompt}}) */
+export function importNovelAIRequest(json) {
+  if (!json || !json.parameters) { toast("不是有效的 NovelAI 请求体", "warning"); return; }
+  const p = json.parameters;
+  const posStr = (c) => (c && typeof c.x === "number" && typeof c.y === "number" ? c.x.toFixed(2) + "," + c.y.toFixed(2) : "0.50,0.50");
+  const state = {
+    positive_prompt: json.input || "",
+    negative_prompt: p.negative_prompt || (p.v4_negative_prompt && p.v4_negative_prompt.caption && p.v4_negative_prompt.caption.base_caption) || "",
+    width: p.width ?? undefined,
+    height: p.height ?? undefined,
+    steps: p.steps ?? undefined,
+    scale: p.scale ?? undefined,
+    seed: p.seed != null ? String(p.seed) : undefined,
+    sampler: p.sampler ?? undefined,
+    noise_schedule: p.noise_schedule ?? undefined,
+  };
+  const chars = p.characterPrompts || (p.v4_prompt && p.v4_prompt.caption && p.v4_prompt.caption.char_captions);
+  if (Array.isArray(chars) && chars.length) {
+    state.characters = chars.map((c) => ({
+      prompt: c.prompt || c.char_caption || "",
+      negative_prompt: c.uc || "",
+      position: posStr(c.center || (c.centers && c.centers[0])),
+      enabled: c.enabled !== false,
+    }));
+  }
+  if (json.model && C.model && S.app.models.includes(json.model)) C.model.set(json.model);
+  applyImportedState(state);
+  toast("已导入 NovelAI 请求内容 📥", "success");
 }
