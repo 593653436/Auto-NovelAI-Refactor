@@ -432,7 +432,7 @@ function renderRemove(body) {
 function renderChat(body) {
   const picker = imageDropZone({ label: "🖼️ 对话图片 (可选)", placeholder: "点击选择或拖入图片 (也可不传, 用下方 tag 文本)", native: true });
   const tagInput = el("textarea", { rows: 3, placeholder: "📝 WD 反推的 tag / 文本 (可选): 例如 1girl, hikari_(blue_archive), standing, pleated_skirt ...", style: "margin-top:10px;" });
-  const hint = el("div", { class: "muted", style: "font-size:12px;margin-top:6px;", text: "📝 无图=tag提取(qwen35 无审查·流式·思考折叠)；🎞 有图=图描述(用下方模型)。例：提取人物/动作/服装" });
+  const hint = el("div", { class: "muted", style: "font-size:12px;margin-top:6px;", text: "📝 无图=tag提取(qwen35 无审查·流式·直接正文)；🎞 有图=图描述(用下方模型)。例：提取场景/动作" });
   const log = el("div", { style: "margin-top:12px;max-height:320px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:10px;background:var(--input);border-radius:8px;" });
   const input = el("textarea", { rows: 2, placeholder: "输入问题，Enter 发送 (Shift+Enter 换行)" });
   const modelLabel = el("label", { class: "muted", style: "font-size:12px;margin-right:6px;", text: "🎞 图描述模型:" });
