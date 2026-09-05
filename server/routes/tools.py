@@ -183,11 +183,11 @@ async def qwen_chat(payload: dict):
     from fastapi.responses import StreamingResponse
     import httpx
 
-    max_tokens = payload.get("max_tokens", 2048)
+    max_tokens = payload.get("max_tokens", 10000)
 
     async def gen():
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(600, connect=25)) as c:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(1200, connect=25)) as c:
                 async with c.stream(
                     "POST",
                     "http://192.168.0.3:8091/v1/chat/completions",

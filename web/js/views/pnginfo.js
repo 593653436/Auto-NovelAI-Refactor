@@ -460,7 +460,7 @@ function renderChat(body) {
     try {
       const payload = imgPath
         ? { image_path: imgPath, prompt: p, model: modelSel.value }
-        : { prompt: (tag ? p + "\n\n基于以下 Danbooru tag，提取【人物】【动作】【服装】等，直接简洁输出：\n" + tag : p), max_tokens: 2048 };
+        : { prompt: (tag ? p + "\n\n基于以下 Danbooru tag，提取【人物】【动作】【服装】等，直接简洁输出：\n" + tag : p), max_tokens: 10000 };
       if (imgPath) {
         const r = await post("/api/tagger/qwen-chat", payload);
         addMsg("qwen", r.reply || "(空)");
