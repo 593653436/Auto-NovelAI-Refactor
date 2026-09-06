@@ -462,8 +462,8 @@ function renderChat(body) {
         ? { image_path: imgPath, prompt: p, model: modelSel.value }
         : { prompt: (tag ? p + "\n\n基于以下 Danbooru tag，提取【人物】【动作】【服装】等，直接简洁输出：\n" + tag : p), max_tokens: 10000 };
       if (imgPath) {
-        const r = await post("/api/tagger/qwen-chat", payload);
-        addMsg("qwen", r.reply || "(空)");
+        // 识图: 后端返回 SSE 流式 (Qwen3.8-VL)
+        await streamChat(payload);
       } else {
         await streamChat(payload);
       }
