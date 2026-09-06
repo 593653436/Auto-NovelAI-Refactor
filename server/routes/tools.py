@@ -164,33 +164,40 @@ async def qwen_chat(payload: dict):
     prompt = payload.get("prompt", "")
     if not prompt:
         raise HTTPException(status_code=400, detail="请输入问题/文本")
-    if image_path:
-        # 有图: ComfyUI Gliese 图描述 (已验证正常)
-        from utils.services import comfyui_tagger
-        try:
-            out = comfyui_tagger.qwen_vl(
-                image_path,
-                payload.get("model", "Gliese-Qwen3.5-9B-Abliterated-Caption.Q4_K_M.gguf"),
-                "🖼️ Simple Description",
-                prompt,
-            )
-            return {"reply": out}
-        except Exception as e:
-            logger.error(f"Qwen 图对话失败: {e}")
-            raise HTTPException(status_code=500, detail=f"Qwen 图对话失败: {e}")
-    # 无图: tag 提取 → qwen35 transformers server (无审查, 流式, 思考)
-    import json as _json
-    from fastapi.responses import StreamingResponse
-    import httpx
-
     max_tokens = payload.get("max_tokens", 10000)
+    if image_path:
+        # 有图: 云端 Qwen3.8-VL(6006) 识图 (无审查+思考)
+        import base64 as _b64
+        try:
+            with open(image_path, "rb") as f:
+                b64 = _b64.b64encode(f.read()).decode()
+            mime = "image/png" if image_path.lower().endswith(".png") else "image/jpeg"
+            content = [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": "data:%s;base64,%s" % (mime, b64)}}]
+        except Exception as e:
+            logger.error(f"读图失败: {e}")
+            content = [{"type": "text", "text": prompt}]
+        import json as _json
+        from fastapi.responses import StreamingResponse
+        import httpx
+        async def geng():
+            try:
+                async with httpx.AsyncClient(timeout=httpx.Timeout(1200, connect=25), verify=False) as c:
+                    async with c.stream("POST", "https://u37677-1yy1-664a775e.weste.seetacloud.com:8443/v1/chat/completions", json={"model": "q38", "messages": [{"role": "user", "content": content}], "stream": True, "max_tokens": max_tokens}) as r:
+                        async for line in r.aiter_lines():
+                            if line:
+                                yield line + "\n\n"
+            except Exception as e:
+                logger.error(f"识图失败: {e}")
+                yield "data: " + _json.dumps({"delta": {"content": "❌ " + str(e)}}, ensure_ascii=False) + "\n\n"
+        return StreamingResponse(geng(), media_type="text/event-stream")
+    # 无图: tag 提取 → 云端 Qwen3.8-27B(6006) 流式(无审查, 思考)
 
     async def gen():
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(1200, connect=25), verify=False) as c:
                 async with c.stream(
                     "POST",
-                    "https://uu37677-1yy1-664a775e.weste.seetacloud.com:8443/v1/chat/completions",
+                    "https://u37677-1yy1-664a775e.weste.seetacloud.com:8443/v1/chat/completions",
                     json={"messages": [{"role": "user", "content": prompt}], "stream": True, "max_tokens": max_tokens},
                 ) as r:
                     if r.status_code != 200:
