@@ -474,11 +474,10 @@ function renderChat(body) {
   const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   async function streamChat(payload) {
     const m = el("div", { style: "padding:8px 10px;border-radius:8px;background:rgba(76,175,80,.12);" });
-    let acc = "";
+    let acc = "";  // 正文 content
+    let acc_r = ""; // 思考 reasoning_content
     const render = () => {
-      const ti = acc.search(/Thinking Process|思考过程|<thinking>|\*\*\*/i);
-      let think = "", body = acc;
-      if (ti >= 0) { think = acc.slice(0, ti + 18); body = acc.slice(ti + 18); }
+      const think = acc_r, body = acc;
       m.innerHTML = "🤖 " + (think
         ? `<details style="margin:2px 0;"><summary style="cursor:pointer;color:var(--muted-foreground);font-size:12px;">🧠 思考</summary><div class="muted" style="font-size:12px;white-space:pre-wrap;">${esc(think)}</div></details><div style="margin-top:4px;white-space:pre-wrap;">${esc(body)}</div>`
         : `<div style="white-space:pre-wrap;">${esc(body)}</div>`);
@@ -496,7 +495,7 @@ function renderChat(body) {
         if (!line) continue;
         const d = line.slice(5).trim();
         if (d === "[DONE]") continue;
-        try { const j = JSON.parse(d); const c = j.choices && j.choices[0] && j.choices[0].delta ? j.choices[0].delta.content : ""; if (c) { acc += c; render(); } } catch (e) { /* ignore */ }
+        try { const j = JSON.parse(d); const dl = j.choices && j.choices[0] && j.choices[0].delta || {}; const r = dl.reasoning_content || ""; const c = dl.content || ""; if (r) { acc_r += r; } if (c) { acc += c; } if (r || c) render(); } catch (e) { /* ignore */ }
       }
     }
     render();

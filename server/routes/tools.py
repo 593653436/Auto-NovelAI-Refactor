@@ -164,7 +164,7 @@ async def qwen_chat(payload: dict):
     prompt = payload.get("prompt", "")
     if not prompt:
         raise HTTPException(status_code=400, detail="请输入问题/文本")
-    max_tokens = payload.get("max_tokens", 10000)
+    max_tokens = payload.get("max_tokens", 16000)
     if image_path:
         # 有图: 云端 Qwen3.8-VL(6006) 识图 (无审查+思考)
         import base64 as _b64
