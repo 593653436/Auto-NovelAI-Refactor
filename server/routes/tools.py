@@ -187,10 +187,10 @@ async def qwen_chat(payload: dict):
 
     async def gen():
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(1200, connect=25)) as c:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(1200, connect=25), verify=False) as c:
                 async with c.stream(
                     "POST",
-                    "http://192.168.0.3:8091/v1/chat/completions",
+                    "https://uu37677-1yy1-664a775e.weste.seetacloud.com:8443/v1/chat/completions",
                     json={"messages": [{"role": "user", "content": prompt}], "stream": True, "max_tokens": max_tokens},
                 ) as r:
                     if r.status_code != 200:
