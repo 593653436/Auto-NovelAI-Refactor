@@ -2,7 +2,7 @@
 
 > 目标：把 **huihui-ai/Huihui-Qwen3.8-27B-abliterated（无审查）+ GGUF Q4_K + mmproj 视觉** 部署到 AutoDL，让 ANR 的 **识图 + tag 提取** 都由这一个模型完成（无审查、保留思考、流式）。
 >
-> 结论：**西部区一台 RTX 4090 48G + llama.cpp CLI（`llama-server --mmproj`）+ GGUF Q4_K 成功**；中途踩了 GPU 架构、Xet 下载、GitHub 网络、llama-cpp-python 无视觉等一堆坑。
+> 结论：**一台物理 RTX 4090 48G + llama.cpp CLI（`llama-server --mmproj`）+ GGUF Q4_K 成功**；中途踩了 GPU 架构、Xet 下载、GitHub 网络、llama-cpp-python 无视觉等一堆坑。
 
 ---
 
@@ -25,10 +25,10 @@
 ### 3. 识图（多模态）必须用 llama.cpp CLI，不能用 llama-cpp-python
 - **`llama-cpp-python` 最新版就是 0.3.35，且 `Llama.__init__` 没有 `mmproj/vision` 参数** → 只能文本，**不能识图**。
 - **识图要走 `llama.cpp CLI（llama-server --mmproj）`**（原生支持 mmproj 视觉 + Qwen3.8-VL）。
-- `--mmproj` 后端（多模态）要求 content 是**数组**（`[{type:text}]`），纯文本也一样——ANR/客户端 JSON 用 `content: "str"` 会 500。
+- `--mmproj` 后端（多模态）要求 content 是**数组**（`[{type:text}]`），纯文本也一样——客户端 JSON 用 `content: "str"` 会 500。
 
-### 4. GitHub 在 AutoDL 西部区全都不通（编不了 llama.cpp）
-- `git clone github.com / gitclone / ghproxy` 在 **westb/westd/weste 全部超时**。
+### 4. GitHub 在 AutoDL 这几个区全都不通（编不了 llama.cpp）
+- `git clone github.com / gitclone / ghproxy` 在 **west 各区分区全部超时**。
 - **解法**：**本机（能上 GitHub，用代理 7897）clone 源码** → `tar` → **ssh/sftp 传到云端** → 云端编（Linux + CUDA + `-DGGML_MTMD=ON`）。llama.cpp 源码约 209M / tar 72M。
 - 编译：`cmake -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=<86|89> -DGGML_MTMD=ON` + `cmake --build -j16`（约 30min）。
 
@@ -44,10 +44,11 @@
 - 参考：llama.cpp issue/discussion **#27164**——RTX 3090 物理卡 + 更新 llama.cpp + FA + libggml-cuda.so 一起更新后，Qwen3.8 就正常；**旧版 CUDA 对 DeltaNet 层有 bug**。
 
 ### 7. AutoDL 公网映射（ANR 接入）
-- 实例内监听 **6006 / 6008**，系统映射到公网（注意**主机名不同**，极易搞混）：
-  - `6006` → `https://u37677-1yy1-664a775e.weste.seetacloud.com:8443`（**一个 u**）
-  - `6008` → `https://uu37677-1yy1-664a775e.weste.seetacloud.com:8443`（**两个 u**）
+- 实例内端口映射到公网（注意**不同端口的公网域名不同，极易搞混**；此处用占位符）：
+  - 端口 `6006` → 公网 `https://<AUTODL端口6006公网域名>:8443`
+  - 端口 `6008` → 公网 `https://<AUTODL端口6008公网域名>:8443`
 - ANR 侧请求（httpx）要 **`verify=False`**（自签 https）。
+- ⚠️ **公网入口/实例域名属敏感信息，别写进仓库文档/聊天记录**。
 
 ### 8. 存数据盘/共享盘
 - 模型/编译产物放 **`/autodl-fs/data`**（AutoDL 大容量数据盘，**跨实例共享**、换实例不丢）比 `/root/autodl-tmp`（50G 实例盘）稳。
@@ -57,10 +58,10 @@
 
 ## 二、最终可复现方案（本次成功配置）
 
-### 云端（weste，RTX 4090 48G，compute 8.9）
+### 云端（物理 RTX 4090 48G，compute 8.9）
 1. 模型：`/autodl-fs/data/27b-gguf/Huihui-Qwen3.8-27B-abliterated-Q4_K.gguf`（16G）+ `mmproj-model-bf16.gguf`（889M）。
 2. llama.cpp：本机 clone + 传云端编译（`-DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=89 -DGGML_MTMD=ON`）。
-3. 启动**识图+提取合一**（6006）：
+3. 启动**识图+提取合一**（端口 6006）：
 ```bash
 cd /root/llama.cpp_src/build/bin
 LD_LIBRARY_PATH=$PWD:/usr/local/cuda/lib64:$LD_LIBRARY_PATH \
@@ -68,7 +69,7 @@ LD_LIBRARY_PATH=$PWD:/usr/local/cuda/lib64:$LD_LIBRARY_PATH \
   --mmproj /autodl-fs/data/27b-gguf/mmproj-model-bf16.gguf \
   --host 0.0.0.0 --port 6006 -ngl 99 -fa on -c 16384 --jinja
 ```
-4. 公网入口：`https://u37677-1yy1-664a775e.weste.seetacloud.com:8443`（6006）。
+4. 公网入口：AutoDL 控制台为端口 6006 生成的公网地址（**不在此写实值**）。
 
 ### ANR（`server/routes/tools.py` 的 `qwen_chat`）
 - **有图**（识图）/ **无图**（提取）都指向上面公网 URL；
@@ -77,6 +78,6 @@ LD_LIBRARY_PATH=$PWD:/usr/local/cuda/lib64:$LD_LIBRARY_PATH \
 ---
 
 ## 三、一句话教训
-> **Qwen3.8(混合 DeltaNet) 想跑通：选物理 Ada/Hopper ≥40G 显存 + 最新 llama.cpp CLI(--mmproj) + GGUF 4-bit；避开 vGPU(乱码) 与 24/32G(装不下 FP8)；GitHub 不通就本机 clone 传云端编；hf-mirror 走 Xet 用 aria2c 硬啃 + 只抓 `*.safetensors`。**
+> **Qwen3.8(混合 DeltaNet) 想跑通：选物理 Ada/Hopper ≥40G 显存 + 最新 llama.cpp CLI(--mmproj) + GGUF 4-bit；避开 vGPU(乱码) 与 24/32G(装不下 FP8)；GitHub 不通就本机 clone 传云端编；hf-mirror 走 Xet 用 aria2c 硬啃 + 只抓 `*.safetensors`；公网入口别落盘。**
 
-（本次提交：ANR `e8dc317` 等——合一识图/提取到云端 Qwen3.8。）
+（本次 ANR 提交：`e8dc317` 等——合一识图/提取到云端 Qwen3.8。）
