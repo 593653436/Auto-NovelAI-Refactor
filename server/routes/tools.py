@@ -191,6 +191,9 @@ async def qwen_chat(payload: dict):
                 yield "data: " + _json.dumps({"delta": {"content": "❌ " + str(e)}}, ensure_ascii=False) + "\n\n"
         return StreamingResponse(geng(), media_type="text/event-stream")
     # 无图: tag 提取 → 云端 Qwen3.8-27B(6006) 流式(无审查, 思考)
+    import json as _json
+    from fastapi.responses import StreamingResponse
+    import httpx
 
     async def gen():
         try:
@@ -198,7 +201,7 @@ async def qwen_chat(payload: dict):
                 async with c.stream(
                     "POST",
                     "https://u37677-1yy1-664a775e.weste.seetacloud.com:8443/v1/chat/completions",
-                    json={"messages": [{"role": "user", "content": prompt}], "stream": True, "max_tokens": max_tokens},
+                    json={"messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}], "stream": True, "max_tokens": max_tokens},
                 ) as r:
                     if r.status_code != 200:
                         yield "data: " + _json.dumps({"delta": {"content": "❌ qwen35 server %s" % r.status_code}}, ensure_ascii=False) + "\n\n"
