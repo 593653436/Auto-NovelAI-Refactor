@@ -169,12 +169,15 @@ async def qwen_chat(payload: dict):
         # 有图: 云端 Qwen3.8-VL(6006) 识图 (无审查+思考)
         import base64 as _b64
         try:
-            with open(image_path, "rb") as f:
-                b64 = _b64.b64encode(f.read()).decode()
-            mime = "image/png" if image_path.lower().endswith(".png") else "image/jpeg"
+            from PIL import Image
+            import io as _io
+            img = Image.open(image_path).convert("RGB")
+            buf = _io.BytesIO(); img.save(buf, format="PNG")
+            b64 = _b64.b64encode(buf.getvalue()).decode()
+            mime = "image/png"
             content = [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": "data:%s;base64,%s" % (mime, b64)}}]
         except Exception as e:
-            logger.error(f"读图失败: {e}")
+            logger.error(f"读图/转PNG失败: {e}")
             content = [{"type": "text", "text": prompt}]
         import json as _json
         from fastapi.responses import StreamingResponse
