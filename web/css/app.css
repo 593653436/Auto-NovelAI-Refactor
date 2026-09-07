@@ -177,6 +177,9 @@
   border-radius: 999px;
 }
 
+/* 对话框本体 (电源菜单 / 确认框): 不透明底色, 与队列弹窗一致 */
+.dialog-solid { background: var(--panel-solid); }
+
 .grid { display: grid; gap: 16px; }
 .grid-2 { grid-template-columns: 1fr 1fr; }
 .grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -248,6 +251,7 @@ input.slider-num {
   transition: all 0.18s;
   user-select: none;
 }
+a.btn { text-decoration: none; }
 .btn:hover { transform: translateY(-1px); box-shadow: var(--shadow); border-color: var(--primary); }
 .btn:active { transform: translateY(0); }
 .btn-primary {
@@ -781,6 +785,11 @@ input.slider-num {
   width: fit-content;
 }
 .role-card .checkline:hover { background: transparent; }
+.role-card .role-head .checkline {
+  align-self: center;
+  gap: 5px;
+  font-size: 13px;
+}
 /* 角色/参考卡片内收紧间距, 避免添加一个角色占用过多空间 */
 .role-card .grid { gap: 6px; }
 .role-card .field { margin-bottom: 0; gap: 3px; }
@@ -796,6 +805,127 @@ input.slider-num {
   margin: 0 auto;
 }
 .role-card .img-drop-zone.has-image .img-drop-preview { max-height: 200px; }
+
+/* ------- 角色位置选择器 (可视化) ------- */
+.pos-picker {
+  position: relative;
+  background: var(--input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+  margin: 0 auto;
+}
+.pos-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  grid-template-rows: repeat(5, 1fr);
+  gap: 2px;
+  padding: 4px;
+  width: 100%;
+  height: 100%;
+}
+.pos-picker-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 2px 1px;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1.1;
+  color: var(--text-2);
+  background: var(--surface-2);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.12s;
+  gap: 1px;
+}
+.pos-picker-cell:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+.pos-picker-cell.occupied {
+  background: color-mix(in srgb, var(--primary) 8%, var(--surface-2));
+  border: 1px solid color-mix(in srgb, var(--primary) 20%, transparent);
+}
+.pos-cell-label {
+  font-size: 8px;
+  opacity: 0.5;
+  line-height: 1;
+}
+.pos-cell-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  justify-content: center;
+  align-items: center;
+}
+.pos-badge {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+  flex-shrink: 0;
+  transition: transform 0.1s;
+}
+.pos-badge:hover { filter: brightness(1.15); }
+.pos-badge.sel {
+  box-shadow: 0 0 0 2px var(--primary);
+}
+.pos-picker-free {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+  background-image:
+    linear-gradient(rgba(128,128,128,0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(128,128,128,0.08) 1px, transparent 1px);
+  background-size: 20% 20%;
+}
+.pos-picker-dot {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+  transform: translate(-50%, -50%);
+  cursor: grab;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+}
+.pos-picker-dot.sel {
+  box-shadow: 0 0 0 2px var(--primary);
+}
+.pos-picker-info {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  text-align: center;
+  margin-top: 4px;
+}
+.role-card.selected {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 25%, transparent);
+}
+.role-card.role-selectable {
+  cursor: pointer;
+}
 
 /* ------- 插件 ------- */
 .plugin-card {
@@ -1692,7 +1822,7 @@ body.has-custom-bg input[type="range"]::-moz-range-track {
 .wc-modal-prompt-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
 .wc-modal-prompt-label { font-size: 13px; font-weight: 700; color: var(--text-2); }
 .wc-modal-prompt .muted { font-size: 12px; }
-.wc-modal-prompt textarea { width: 100%; min-height: 128px; resize: vertical; line-height: 1.55; }
+.wc-modal-prompt textarea { width: 100%; min-height: 128px; max-height: 354px; resize: vertical; line-height: 1.55; }
 .wc-modal-body { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 18px 18px; }
 .wc-modal-loading { padding: 30px; text-align: center; }
 
@@ -1771,7 +1901,8 @@ body.has-custom-bg input[type="range"]::-moz-range-track {
   align-items: flex-start;
   align-content: flex-start;
   min-height: 64px;
-  max-height: 180px;
+  /* 与生成页正面提示词输入框最大高度一致: 15 行 × 22.4px (14px × 1.6) + 18px 内边距/边框 = 354px */
+  max-height: 354px;
   overflow-y: auto;
   padding: 10px;
   border: 1px solid var(--border);
@@ -2322,24 +2453,25 @@ body.has-custom-bg input[type="range"]::-moz-range-track {
 }
 .pixiv-pid:hover { background: color-mix(in srgb, var(--primary) 24%, transparent); }
 
-.ack-title { font-size: 13px; font-weight: 700; color: var(--text-2); margin: 14px 0 8px; }
-.ack-title:first-of-type { margin-top: 2px; }
+.ack-title { font-size: 13px; font-weight: 700; color: var(--text-2); margin: 0 0 8px; }
 
 /* ------- 赞助页: 翻页区域与内容铺满可用空间 ------- */
 .pager-viewport { height: calc(100vh - 300px); min-height: 400px; }
 .pager-card { height: 100%; display: flex; flex-direction: column; }
 .pager-card > .card-title, .pager-card > p { flex-shrink: 0; }
 
-/* 页1: 收款码卡片纵向撑满, 二维码尽量大 */
+/* 页3: 收款码卡片纵向撑满, 二维码尽量大 */
 .pager-card .sponsor-grid { flex: 1; min-height: 0; margin-top: 10px; gap: 24px; }
 .pager-card .sponsor-item { justify-content: center; gap: 14px; padding: 20px 16px; }
 .pager-card .sponsor-qr { flex: 1; min-height: 0; width: auto; max-width: 100%; margin: 0 auto; aspect-ratio: 1; }
 .pager-card .sponsor-label { font-size: 15px; }
 
-/* 页2: 两组卡片统一行高 (大小一致), 整体在页面内垂直居中 */
+/* 页1: 两组卡片统一行高 (大小一致), 整体在页面内垂直居中 */
 .ack-body { flex: 1; min-height: 0; display: flex; flex-direction: column; justify-content: center; }
 .ack-group { display: flex; flex-direction: column; }
-.ack-group .ack-title { flex-shrink: 0; margin: 14px 0 10px; }
+/* 两组顺次排布, 小标题只与上一组卡片留固定间距, 消除居中导致的小标题上方大片空白 */
+.ack-body > .ack-group + .ack-group { margin-top: 22px; }
+.ack-group .ack-title { flex-shrink: 0; margin: 0 0 10px; }
 .ack-group .ack-grid {
   grid-auto-rows: 132px; gap: 14px;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
@@ -2347,6 +2479,23 @@ body.has-custom-bg input[type="range"]::-moz-range-track {
 .ack-item { justify-content: center; gap: 7px; padding: 14px 18px; }
 .ack-name { font-size: 14px; }
 .ack-desc { font-size: 12.5px; }
+
+/* 页2: 加群交流 — 二维码与按钮纵向排列居中 */
+.join-grid { flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; }
+.join-grid .sponsor-item { padding: 18px 22px; gap: 12px; }
+.join-grid .sponsor-qr { width: 220px; height: 220px; }
+.join-grid .sponsor-label { font-size: 15px; }
+.sponsor-qr-link { display: block; text-decoration: none; }
+/* 悬停效果由内部 .sponsor-item 自身的上浮负责, 外层链接不再叠加位移, 避免双重弹跳 */
+.sponsor-qr-link:hover .sponsor-item { border-color: var(--primary); }
+.join-btn { font-size: 15px; padding: 10px 34px; }
+
+/* 配置设置: 共享链接外网链接 */
+.share-link-field { grid-column: 1 / -1; }
+.share-link { color: var(--primary); font-weight: 600; word-break: break-all; cursor: pointer; }
+.share-link:hover { text-decoration: underline; }
+.share-link:not([href]) { color: var(--text-2); opacity: 0.8; cursor: default; }
+.share-link:not([href]):hover { text-decoration: none; }
 
 /* ------- 卡片分类删除按钮 (悬停 tab 显示) 与收藏分类标题 ------- */
 .wc-type-del {
@@ -2436,6 +2585,8 @@ body.has-custom-bg input[type="range"]::-moz-range-track {
   max-height: min(72vh, 640px);
   display: flex;
   flex-direction: column;
+  /* 覆盖 .card 的半透明毛玻璃背景, 与 Wildcards 弹窗一样用不透明底色 */
+  background: var(--panel-solid);
   animation: pop-in 0.2s ease;
 }
 .queue-modal-title { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }

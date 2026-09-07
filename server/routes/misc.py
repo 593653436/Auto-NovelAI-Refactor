@@ -22,7 +22,7 @@ from utils.gen_queue import gen_queue
 from utils.helpers import get_update_status, read_json, shutdown_app
 from utils.jobs import jobs
 from utils.logger import logger
-from utils.plugins import get_manifest
+from utils.plugins import get_manifest, plugins_reload_status
 from utils.services import settings, tagger, wildcards
 from utils.variable import (
     CHARACTER_POSITION,
@@ -30,9 +30,11 @@ from utils.variable import (
     MODELS,
     NOISE_SCHEDULE,
     QP_PRESET,
+    QUALITY_TAGS,
     RESOLUTION,
     SAMPLER,
     UC_PRESET,
+    UC_PRESET_TAGS,
     VERSION,
     WILDCARD_TYPE,
 )
@@ -79,6 +81,8 @@ async def get_state():
         "noise_schedules": NOISE_SCHEDULE,
         "uc_presets": UC_PRESET,
         "qp_presets": QP_PRESET,
+        "quality_preset_tags": QUALITY_TAGS,  # 预设名 -> 标签文本 (前端加载上次时剥离检测用)
+        "uc_preset_tags": UC_PRESET_TAGS,  # 负面预设名 -> 标签文本 (前端加载上次时剥离检测用)
         "positions": CHARACTER_POSITION,
         "cr_modes": CR_MODE,
         "wildcard_types": WILDCARD_TYPE,
@@ -88,6 +92,8 @@ async def get_state():
         "parameters": parameters,
         "settings": settings.get_settings(),
         "plugins": get_manifest(),
+        # 插件重载状态: 共享开关切换后前端等待重载完成再刷新一次
+        "plugins_reload": plugins_reload_status(),
         # plugin_rows 已拆分到 /api/plugins/rows: 含逐插件 git 更新检查,
         # 放在这里会阻塞前端启动时的状态请求数秒
         "busy": jobs.is_busy,
