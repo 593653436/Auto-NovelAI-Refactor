@@ -43,6 +43,14 @@ def set_mode(m: str) -> str:
     if m not in MODES:
         m = "off"
     env.update({"skip_exhausted_mode": m})
+    # 立即按新模式重判已有记录: 状态与日志不需要等下一轮采样
+    with _lock:
+        recs = [dict(r) for r in _records.values()]
+    for r in recs:
+        try:
+            update(int(r.get("index", 0)), r.get("anlas"), r.get("remains"), "mode-change")
+        except Exception:  # noqa: BLE001
+            pass
     return m
 
 
@@ -90,11 +98,17 @@ def update(index: int, anlas, remains, source: str = "sample") -> dict:
     with _lock:
         old = _records.get(int(index))
         _records[int(index)] = rec
-    if old is None or old.get("usable") != usable:
+    # 只在真正发生状态变化时打日志 (首次记录不算"恢复", 否则开机就会误报一轮)
+    if old is None:
+        if not usable:
+            logger.warning(f"Token#{index} 暂停生图: {reason} (恢复后自动启用)")
+        else:
+            logger.debug(f"Token#{index} 状态已记录 (可用)")
+    elif old.get("usable") != usable:
         if usable:
             logger.info(f"Token#{index} 额度已恢复, 重新参与生图")
         else:
-            logger.warning(f"Token#{index} 已暂停生图: {reason} (恢复后自动启用)")
+            logger.warning(f"Token#{index} 暂停生图: {reason} (恢复后自动启用)")
     return rec
 
 
