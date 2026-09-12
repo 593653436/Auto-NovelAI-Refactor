@@ -67,6 +67,15 @@ def _apply_runtime(data: dict) -> None:
     except Exception:
         pass
 
+    # Token 列表变化时立即采样一次: 新加的 Token 马上出现在额度统计/可用性里
+    if "tokens" in data or "token" in data:
+        try:
+            from utils.services import anlas_history
+
+            anlas_history.take_sample("tokens-changed")
+        except Exception:
+            pass
+
 
 def save_settings(data: dict) -> dict:
     """保存配置: 立即生效, 返回变更标志供前端提示 (端口 / 隐藏终端等需注意的重启事项)。"""

@@ -72,6 +72,7 @@ class _Worker(threading.Thread):
         self.status = "idle"  # idle | running | cooling
         self.task_id: str | None = None
         self.cool_left = 0.0
+        self.pause_reason = ""  # 非空 = 该通道对应 Token 被暂停 (额度/点数耗尽)
 
     def run(self) -> None:
         while not self.stop_flag.is_set():
@@ -79,7 +80,8 @@ class _Worker(threading.Thread):
             if task is None:
                 if self.stop_flag.is_set():
                     break
-                self.status = "idle"
+                if self.status != "paused":
+                    self.status = "idle"  # 被额度/点数暂停的通道保留 paused 状态供前端展示
                 self.queue._wake.wait(0.5)
                 self.queue._wake.clear()
                 continue
@@ -111,6 +113,13 @@ class _Worker(threading.Thread):
             logger.error(f"队列任务 [{task.label}] 执行失败: {e}")
             logger.opt(exception=True).debug("队列任务失败堆栈:")
             broker.publish("job:failed", {"id": task.id, "name": task.name, "ok": False, "error": task.error})
+            # 失败可能因额度/点数耗尽: 复查该 Token, 必要时暂停它 (不再领任务)
+            try:
+                from utils.services import token_health
+
+                token_health.mark_failed(self.idx, task.error or "")
+            except Exception:  # noqa: BLE001
+                pass
         finally:
             task.finished_at = time.time()
             pop_current_job()
@@ -205,6 +214,23 @@ class GenerationQueue:
         self.ensure_workers()
         self._publish()
 
+    def _token_usable(self, idx: int) -> bool:
+        """该通道绑定的 Token 当前是否可用于生图 (额度/点数耗尽时可被暂停)。"""
+        try:
+            from utils.services import token_health
+
+            return token_health.is_usable(idx)
+        except Exception:  # noqa: BLE001
+            return True
+
+    def _pause_reason(self, idx: int) -> str:
+        try:
+            from utils.services import token_health
+
+            return token_health.reason(idx)
+        except Exception:  # noqa: BLE001
+            return ""
+
     def _take_next(self, worker: _Worker) -> _Task | None:
         """通道领取队首任务 (FIFO); 通道号超出期望数量时通知其退出。
 
@@ -215,6 +241,15 @@ class GenerationQueue:
             if worker.idx >= self.desired_workers():
                 worker.stop_flag.set()
                 return None
+            # 额度/点数耗尽的 Token: 暂停领任务, 等额度恢复后自动继续 (停用期间不算空闲通道)
+            if not self._token_usable(worker.idx):
+                worker.status = "paused"
+                worker.pause_reason = self._pause_reason(worker.idx)
+                return None
+            if worker.pause_reason or worker.status == "paused":
+                worker.pause_reason = ""
+                if worker.status == "paused":
+                    worker.status = "idle"  # 额度已恢复: 通道重新可用
             # 已被任务占用的通道集合 (含刚领到任务、status 尚未更新的通道)
             running_idx = {t.worker for t in self._running.values()}
             # 存在编号更小的空闲通道时让位, 保证任务优先分配给靠前的 Token
@@ -224,6 +259,8 @@ class GenerationQueue:
                 w = self._workers[i]
                 if not w.is_alive() or w.stop_flag.is_set() or i >= self.desired_workers():
                     continue
+                if not self._token_usable(i):
+                    continue  # 被暂停的通道不参与让位, 否则队头任务会一直空等它
                 if w.status == "idle" and i not in running_idx:
                     return None
             while self._order:
@@ -367,6 +404,7 @@ class GenerationQueue:
                         "status": w.status,
                         "task_id": w.task_id,
                         "cooldown_left": round(w.cool_left, 1) if w.status == "cooling" else 0,
+                        "pause_reason": w.pause_reason,  # 非空 = 该 Token 因额度/点数耗尽被暂停
                     }
                 )
             tasks = [

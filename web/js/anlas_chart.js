@@ -317,6 +317,8 @@ export function createAnlasPanel() {
   let hours = 24;
   let intervalSec = 1800;
   let selIdx = -1; // -1 = 查看全部 Token (各 Token 一种颜色, 实线=额度 / 虚线=点数)
+  let skipMode = "off"; // 额度/点数耗尽时的处理方式
+  let health = [];      // 各 Token 的可用性状态
 
   // Token 切换 (各 Token 额度独立; 图为该 Token 的 额度% + 点数 两条线)
   const tokenSel = el("select", { class: "btn btn-sm", style: "padding:2px 6px;", title: "选择要查看的 Token" });
@@ -448,7 +450,35 @@ export function createAnlasPanel() {
   });
 
   const refreshBtn = el("button", { class: "btn btn-sm", text: "🔄 刷新" });
-  refreshBtn.addEventListener("click", () => refresh());
+  refreshBtn.addEventListener("click", async () => {
+    // 刷新前先实时检查一次额度 (纯查询, 不消耗): 恢复了的 Token 立刻重新参与生图
+    refreshBtn.disabled = true;
+    const old = refreshBtn.textContent;
+    refreshBtn.textContent = "检查中…";
+    try {
+      await get("/api/tokens/health?check=1");
+    } catch { /* 检查失败也照常刷新本地数据 */ }
+    await refresh();
+    refreshBtn.disabled = false;
+    refreshBtn.textContent = old;
+  });
+
+  // 额度/点数耗尽时的处理方式
+  const modeSel = el("select", { class: "btn btn-sm", style: "padding:2px 6px;", title: "额度/点数耗尽时是否暂停该 Token 生图" });
+  modeSel.addEventListener("change", async () => {
+    try {
+      const r = await post("/api/tokens/health/mode", { mode: modeSel.value });
+      if (r.ok) {
+        skipMode = r.mode;
+        toast("已设置: " + (r.label || r.mode), "success");
+        await refresh();
+      } else {
+        toast(r.message || "设置失败", "error");
+      }
+    } catch (e) {
+      toast("设置失败: " + e.message, "error");
+    }
+  });
 
   const controls = el("div", { style: "display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:8px;" }, [
     el("span", { style: "font-size:12px;", text: "Token" }),
@@ -460,6 +490,8 @@ export function createAnlasPanel() {
     saveIntervalBtn,
     sampleBtn,
     refreshBtn,
+    el("span", { style: "font-size:12px;margin-left:4px;", text: "额度用尽时" }),
+    modeSel,
   ]);
 
   const card = el("div", { class: "card", style: "margin-top:12px;" }, [
@@ -488,9 +520,17 @@ export function createAnlasPanel() {
       const color = LINE_COLORS[i % LINE_COLORS.length];
       const rate = s.measured_per_hour;
       const pred = s.predicted_per_hour;
+      const h = health.find((x) => x.index === s.index);
+      // 状态: 已暂停(额度/点数耗尽) / 可用 / 尚未采样
+      const statusNode = !s.samples
+        ? el("span", { style: "color:var(--text-2);", text: "尚无采样" })
+        : (h && h.usable === false
+          ? el("span", { style: "color:#e5484d;font-weight:600;", text: `⏸ 已暂停生图 (${h.reason || "额度用尽"})` })
+          : el("span", { style: "color:#22c55e;", text: "✅ 可用" }));
       const row = el("div", { style: "display:flex;flex-wrap:wrap;gap:6px;align-items:baseline;" }, [
         el("span", { style: `color:${color};font-weight:600;`, text: `${marks[i] || i + 1}${s.token || ""}` }),
         el("span", { text: `当前 ${s.remains ?? "?"}% · 点数 ${s.anlas ?? "?"}` }),
+        statusNode,
         el("span", { style: "color:var(--text-2);", text: `实测 ${fmtRate(rate)}` }),
         el("span", { style: "color:var(--text-2);", text: `接口推算 ${fmtRate(pred)}` }),
         s.anlas_delta !== null && s.anlas_delta !== undefined && Number(s.anlas_delta) !== 0
@@ -500,6 +540,19 @@ export function createAnlasPanel() {
       ].filter(Boolean));
       summary.append(row);
     });
+    if (skipMode !== "off") {
+      const paused = stats.filter((s) => {
+        const h = health.find((x) => x.index === s.index);
+        return h && h.usable === false;
+      }).length;
+      summary.append(el("div", {
+        class: "muted",
+        style: "font-size:11px;margin-top:2px;",
+        text: paused
+          ? `当前 ${paused} 个 Token 已暂停生图: 队列会跳过它们, 额度恢复后自动重新参与 (刷新可立即复查)。`
+          : "当前没有 Token 被暂停; 额度用尽时会自动暂停并跳过, 恢复后自动启用。",
+      }));
+    }
     summary.append(el("div", {
       class: "muted",
       style: "font-size:11px;margin-top:2px;",
@@ -511,6 +564,15 @@ export function createAnlasPanel() {
     try {
       const d = await get("/api/anlas/history?hours=" + (hours || 0));
       stats = d.stats || [];
+      health = d.health || [];
+      if (Array.isArray(d.skip_modes) && modeSel.options.length !== d.skip_modes.length) {
+        modeSel.replaceChildren();
+        d.skip_modes.forEach((m) => modeSel.append(el("option", { value: m.value, text: m.label })));
+      }
+      if (d.skip_mode) {
+        skipMode = d.skip_mode;
+        modeSel.value = skipMode;
+      }
       if (d.interval) {
         intervalSec = d.interval;
         intervalInput.value = String(Math.round(d.interval / 60));

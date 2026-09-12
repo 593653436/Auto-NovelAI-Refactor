@@ -67,6 +67,14 @@ def take_sample(reason: str = "auto") -> dict | None:
     if not tokens:
         return None
 
+    # 顺带刷新 Token 可用性状态 (额度/点数耗尽的可被停用, 见 token_health)
+    try:
+        from utils.services import token_health
+
+        token_health.update_many(tokens, "sample")
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"同步 Token 健康状态失败: {e}")
+
     sample = {"t": time.time(), "reason": reason, "tokens": tokens}
     with _lock:
         data = _load()
@@ -97,16 +105,44 @@ def _slope_per_hour(points: list[tuple[float, float]]) -> float | None:
 
 
 def compute_stats(data: list[dict]) -> list[dict]:
-    """按 Token 汇总: 当前值 / 实测恢复速度 (%/小时) / 接口预测速度 / 点数变化。"""
+    """按 Token 汇总: 当前值 / 实测恢复速度 (%/小时) / 接口预测速度 / 点数变化。
+
+    配置里的每个 Token 都会出现在结果里 —— 新添加的 Token 即使还没有采样点也会列出
+    (否则前端下拉/统计会漏掉它)。
+    """
+    from utils.tokens import get_tokens, mask_token
+
     by_token: dict[int, list[dict]] = {}
     for s in data:
         for t in s.get("tokens") or []:
             idx = int(t.get("index") or 0)
             by_token.setdefault(idx, []).append({"t": float(s.get("t") or 0), "v": t})
 
+    configured = get_tokens()
+    for i in range(len(configured)):
+        by_token.setdefault(i, [])
+
     stats: list[dict] = []
     for idx in sorted(by_token):
         rows = sorted(by_token[idx], key=lambda r: r["t"])
+        masked = mask_token(configured[idx]) if idx < len(configured) else None
+        if not rows:
+            # 还没有采样点 (例如刚添加的 Token)
+            stats.append({
+                "index": idx,
+                "token": masked,
+                "samples": 0,
+                "span_hours": 0.0,
+                "remains": None,
+                "anlas": None,
+                "measured_per_hour": None,
+                "predicted_per_hour": None,
+                "next_percent_in": None,
+                "anlas_delta": None,
+                "points": [],
+                "anlas_points": [],
+            })
+            continue
         usage_pts = [(r["t"], float(r["v"]["remains"])) for r in rows if float(r["v"].get("remains", -1)) >= 0]
         anlas_pts = [(r["t"], float(r["v"]["anlas"])) for r in rows if float(r["v"].get("anlas", -1)) >= 0]
         latest = rows[-1]["v"]
@@ -124,7 +160,7 @@ def compute_stats(data: list[dict]) -> list[dict]:
 
         stats.append({
             "index": idx,
-            "token": latest.get("token"),
+            "token": latest.get("token") or masked,
             "samples": len(rows),
             "span_hours": round(span_h, 2),
             "remains": latest.get("remains"),

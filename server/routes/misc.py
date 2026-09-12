@@ -1156,8 +1156,9 @@ def get_anlas_history(hours: float = 24):
     - hours: 回看时长 (小时), 默认 24; 传 0 或负数表示全部
     - 实测速度: 对采样点做最小二乘拟合, 换算 %/小时
     - 预测速度: 接口给出的 usage.timeUntilNextPercent 推算 (3600/该秒数)
+    - 配置里的每个 Token 都会出现在 stats 里 (新加的 Token 即使还没采样也会列出)
     """
-    from utils.services import anlas_history
+    from utils.services import anlas_history, token_health
 
     data = anlas_history.samples(hours if hours and hours > 0 else None)
     return {
@@ -1165,7 +1166,36 @@ def get_anlas_history(hours: float = 24):
         "stats": anlas_history.compute_stats(data),
         "interval": anlas_history.interval_seconds(),
         "file": str(anlas_history.HISTORY_FILE),
+        "skip_mode": token_health.mode(),
+        "skip_modes": [{"value": k, "label": v} for k, v in token_health.MODE_LABELS.items()],
+        "health": token_health.snapshot(),
     }
+
+
+@router.get("/tokens/health")
+def get_token_health(check: bool = False):
+    """各 Token 的可用性状态 (额度/点数是否耗尽, 是否被暂停参与生图)。
+
+    check=true 时先实时查询一次 (纯查询接口, 不消耗额度)。
+    """
+    from utils.services import token_health
+
+    if check:
+        token_health.check_all("manual")
+    return {
+        "mode": token_health.mode(),
+        "modes": [{"value": k, "label": v} for k, v in token_health.MODE_LABELS.items()],
+        "tokens": token_health.snapshot(),
+    }
+
+
+@router.post("/tokens/health/mode")
+def post_token_health_mode(payload: dict = None):
+    """设置"额度/点数耗尽时"的处理方式: off | usage | anlas | both。"""
+    from utils.services import token_health
+
+    m = token_health.set_mode((payload or {}).get("mode"))
+    return {"ok": True, "mode": m, "label": token_health.MODE_LABELS.get(m, "")}
 
 
 @router.post("/anlas/sample")

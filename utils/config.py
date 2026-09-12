@@ -37,6 +37,8 @@ DEFAULTS: dict[str, Any] = {
     "smtp_token": None,
     "wework_mode": False,
     "anlas_sample_interval": 1800,  # 额度采样间隔 (秒, 默认半小时)
+    # 额度/点数耗尽的 Token 是否暂停参与生图: off | usage | anlas | both
+    "skip_exhausted_mode": "off",
 }
 
 _LIST_KEYS = {"tokens"}
