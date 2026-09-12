@@ -83,7 +83,13 @@ async function boot() {
     }
   }
 
-  const isLocalAccess = ["127.0.0.1", "localhost", "[::1]"].includes(location.hostname);
+  // 本地回环与局域网直连都能正常用 SSE; 只有经隧道域名 (Cloudflare 会缓冲 SSE) 时才退化为轮询
+  const isPrivateHost = (h) => {
+    if (["127.0.0.1", "localhost", "[::1]", "::1"].includes(h)) return true;
+    if (/^10\./.test(h) || /^192\.168\./.test(h)) return true;          // 10.0.0.0/8, 192.168.0.0/16
+    return /^172\.(1[6-9]|2\d|3[01])\./.test(h);                        // 172.16.0.0/12
+  };
+  const isLocalAccess = isPrivateHost(location.hostname);
   if (isLocalAccess) {
     const es = new EventSource("/api/events");
     es.onopen = () => { connDot.classList.add("online"); connDot.classList.remove("offline"); };
@@ -96,11 +102,14 @@ async function boot() {
   } else {
     connDot.classList.add("online");
     let lastLogSeq = 0;
+    let primed = false;
     async function pollLive() {
       try {
-        const d = await get("/api/live?log_after=" + lastLogSeq);
+        const d = await get("/api/live?log_after=" + lastLogSeq + (primed ? "" : "&prime=1"));
+        primed = true;
         lastLogSeq = d.last ?? lastLogSeq;
         for (const ev of d.logs || []) handleEvent(ev);
+        for (const ev of d.events || []) handleEvent(ev);   // 任务事件 (job:done 等), 输出区据此刷新
         lastQueue = d.queue || lastQueue;
         updateJobStatus();
       } catch { /* 后端忙, 下一轮重试 */ }

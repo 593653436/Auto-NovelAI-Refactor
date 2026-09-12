@@ -89,13 +89,17 @@ def create_app() -> FastAPI:
     # 共享链接 (隧道) 访问时 Cloudflare 会缓冲 SSE 实时流, 前端退化为轮询本接口:
     # 增量拉取日志 + 队列快照, 每 2 秒一次
     @app.get("/api/live")
-    async def live_poll(log_after: int = 0):
+    async def live_poll(log_after: int = 0, prime: bool = False):
         seq_now = broker.current_seq()
         if log_after > seq_now:
             log_after = 0  # 后端重启后序号已重置, 前端序号失效时重新全量拉取
         logs = broker.history_after("log", log_after)
-        last = logs[-1]["seq"] if logs else min(log_after, seq_now)
-        return {"logs": logs, "last": last, "queue": gen_queue.snapshot()}
+        # 任务事件 (job:done 等) 也必须增量下发: 否则轮询模式下输出图片区不会刷新
+        # prime=1 为首次调用: 只回补日志, 不回放历史任务事件 (避免刷新页面后重复渲染/重复通知)
+        events = [] if prime else broker.events_after(log_after, ("job:start", "job:event", "job:done", "job:failed"))
+        seqs = [e.get("seq", 0) for e in (*logs, *events)]
+        last = seq_now if prime else (max(seqs) if seqs else min(log_after, seq_now))
+        return {"logs": logs, "events": events, "last": last, "queue": gen_queue.snapshot()}
 
     # 图标
     @app.get("/favicon.ico", include_in_schema=False)

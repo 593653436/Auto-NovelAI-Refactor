@@ -64,5 +64,10 @@ class EventBroker:
         with self._lock:
             return [e for e in self._history if e["type"] == event_type and e.get("seq", 0) > after_seq]
 
+    def events_after(self, after_seq: int, types: tuple[str, ...]) -> list[dict[str, Any]]:
+        """返回 seq 大于 after_seq、类型属于 types 的事件 (供轮询增量拉取任务事件)。"""
+        with self._lock:
+            return [e for e in self._history if e["type"] in types and e.get("seq", 0) > after_seq]
+
 
 broker = EventBroker()
