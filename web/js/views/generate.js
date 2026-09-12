@@ -123,7 +123,7 @@ export async function render(container, ctx) {
   updateAiChoiceVisibility();
   bindEvents();
   wireOutputActions();
-  updateAnlasBadge();
+  updateAnlasBadge(true); // 打开页面即实时查询一次剩余用量 (纯查询, 不消耗额度)
 }
 
 // ---------------- 启动加载: 从 last.json 恢复上次参数 ----------------
@@ -851,10 +851,18 @@ function buildParamsTab(body, saved) {
 // ---------------- Row2 右: 输出 ----------------
 
 function buildRightPanel() {
+  // 徽标可点击立即查询 (纯查询接口, 不消耗额度)
+  const anlasBadge = el("span", {
+    class: "badge",
+    id: "anlas-badge",
+    style: "margin-left:auto;cursor:pointer;",
+    title: "点击立即查询剩余点数/用量 (纯查询, 不消耗额度)",
+  }, "点数: --");
+  anlasBadge.addEventListener("click", () => updateAnlasBadge(true));
   const card = el("div", { class: "card", style: "min-height:400px;display:flex;flex-direction:column;" }, [
     el("div", { class: "card-title" }, [
       "🖼️ 输出图片",
-      el("span", { class: "badge", id: "anlas-badge", style: "margin-left:auto;cursor:default;", title: "最近一次生成后的剩余点数 / 用量 (每次生成后更新)" }, "点数: --"),
+      anlasBadge,
     ]),
   ]);
   genGalleryEl = el("div", { class: "gallery", style: "flex:1;" });
@@ -873,21 +881,59 @@ function buildRightPanel() {
   return card;
 }
 
-/** 刷新右上角"剩余点数/用量"徽标 (最近一次生成后由后端缓存, 生成结束与页面加载时更新) */
-async function updateAnlasBadge() {
+/** 刷新右上角"剩余点数/用量"徽标
+ *  - refresh=false: 读后端缓存 (生成结束后自动调用, 零开销)
+ *  - refresh=true : 实时调 /api/anlas?refresh=1 逐个 Token 查询 (纯查询接口, 不消耗额度)
+ */
+async function updateAnlasBadge(refresh = false) {
+  const badge = document.getElementById("anlas-badge");
+  if (badge && refresh) badge.textContent = "点数: 查询中…";
   try {
-    const res = await fetch("/api/anlas");
+    const res = await fetch("/api/anlas" + (refresh ? "?refresh=1" : ""));
     const data = await res.json();
-    const badge = document.getElementById("anlas-badge");
-    if (!badge) return;
-    const a = Number(data.anlas);
-    const r = Number(data.remains);
-    if (Number.isFinite(a) && Number.isFinite(r) && a >= 0) {
-      badge.textContent = `点数: ${a} · 用量: ${r}%`;
+    const b = document.getElementById("anlas-badge");
+    if (!b) return;
+    const list = Array.isArray(data.tokens) && data.tokens.length ? data.tokens : null;
+
+    if (list && list.length > 1) {
+      // 多 Token: 各通道额度独立, 逐个展示 ①8054点·86%  ②0点·2%
+      const marks = ["①", "②", "③", "④", "⑤"];
+      b.textContent = list
+        .map((t, i) => {
+          const a = Number(t.anlas);
+          const r = Number(t.remains);
+          const ok = Number.isFinite(a) && a >= 0;
+          return `${marks[i] || i + 1}${ok ? a : "?"}点·${Number.isFinite(r) && r >= 0 ? r : "?"}%`;
+        })
+        .join("  ");
+      b.title =
+        "各 Token 独立额度, 顺序与设置里的 Token 一致\n" +
+        list
+          .map((t, i) => {
+            const a = Number(t.anlas);
+            const r = Number(t.remains);
+            const info = `${a >= 0 ? a + " 点" : "查询失败"} · ${r >= 0 ? r + "%" : "?"}`;
+            return `${i + 1}. ${t.token || "?"}: ${info}`;
+          })
+          .join("\n") +
+        "\n\n点击可再次查询 (纯查询接口, 不消耗额度)";
     } else {
-      badge.textContent = "点数: -- · 用量: --";
+      const src = list ? list[0] : data;
+      const a = Number(src.anlas);
+      const r = Number(src.remains);
+      b.textContent = Number.isFinite(a) && Number.isFinite(r) && a >= 0
+        ? `点数: ${a} · 用量: ${r}%`
+        : "点数: -- · 用量: --";
+      b.title = "点击立即查询剩余点数/用量 (纯查询, 不消耗额度)";
     }
-  } catch {}
+
+    // 有 Token 快用尽时标红, 状态一眼可辨
+    const low = !!list && list.some((t) => Number(t.remains) >= 0 && Number(t.remains) <= 10);
+    b.style.color = low ? "#e5484d" : "";
+  } catch {
+    const b = document.getElementById("anlas-badge");
+    if (b && refresh) b.textContent = "点数: 查询失败";
+  }
 }
 
 function wireOutputActions() {

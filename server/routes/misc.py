@@ -1127,8 +1127,23 @@ def translate_online(payload: dict):
 
 
 @router.get("/anlas")
-def get_anlas():
-    """返回最近一次生成后查询到的 (剩余点数, 剩余用量), 未生成过时为 -1。"""
-    from utils.generator import ANLAS, REMAINS
+def get_anlas(refresh: bool = False):
+    """返回剩余点数/用量。
 
-    return {"anlas": ANLAS, "remains": REMAINS}
+    - 默认: 最近一次生成后缓存的值 (未生成过为 -1)
+    - refresh=true: 实时调用 NovelAI 纯查询接口 /user/subscription 逐个 Token 查询
+      (**不消耗额度、不生成图片**), 并返回每个 Token 的明细。
+    """
+    from utils.generator import ANLAS, REMAINS, inquire_anlas_all
+
+    tokens = None
+    anlas, remains = ANLAS, REMAINS
+    if refresh:
+        try:
+            tokens = inquire_anlas_all()
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"实时查询剩余点数失败: {e}")
+            tokens = []
+        if tokens:
+            anlas, remains = tokens[0]["anlas"], tokens[0]["remains"]
+    return {"anlas": anlas, "remains": remains, "tokens": tokens}

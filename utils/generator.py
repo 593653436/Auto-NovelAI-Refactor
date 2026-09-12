@@ -67,6 +67,24 @@ def inquire_anlas():
         return -1, -1
 
 
+def inquire_anlas_all() -> list[dict]:
+    """逐个 Token 查询剩余点数/用量 (纯查询接口 /user/subscription, 不消耗任何额度)。
+
+    多 Token 时各通道额度独立, 需要分别查询; 返回每项 {index, token(打码), anlas, remains}。
+    """
+    from utils.tokens import get_tokens, mask_token, pop_thread_token, set_thread_token
+
+    out: list[dict] = []
+    for i, tok in enumerate(get_tokens()):
+        set_thread_token(tok)
+        try:
+            anlas, remains = inquire_anlas()
+        finally:
+            pop_thread_token()
+        out.append({"index": i, "token": mask_token(tok), "anlas": anlas, "remains": remains})
+    return out
+
+
 def _response_error_message(rep) -> str:
     try:
         body = rep.json()
