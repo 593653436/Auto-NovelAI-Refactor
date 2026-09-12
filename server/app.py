@@ -49,6 +49,15 @@ def create_app() -> FastAPI:
 
     threading.Thread(target=_warm_caches, daemon=True, name="warmup").start()
 
+    # 后台额度采样: 定时调用纯查询接口记录剩余点数/用量 (不消耗额度),
+    # 供前端统计额度恢复速度; 页面未打开时同样记录
+    try:
+        from utils.services import anlas_history
+
+        anlas_history.start_scheduler()
+    except Exception as e:
+        logger.warning(f"额度采样线程启动失败: {e}")
+
     # 静态资源禁用启发式缓存: 每次用 ETag 协商, 文件有改动立即生效
     @app.middleware("http")
     async def _no_cache_static(request, call_next):

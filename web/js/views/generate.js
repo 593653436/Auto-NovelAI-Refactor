@@ -7,6 +7,7 @@
 import { $, $$, el, clear, toast, bus, sliderRow, edgeScroll, imageDropZone, fileDropZone, wireAutocomplete, wildcardsButton } from "../ui.js";
 import { post, imageUrl, fetchLast, openDir, uploadFiles } from "../api.js";
 import { gallery, imageEditor, roleList, characterRegionPicker } from "../components.js";
+import { createAnlasPanel } from "../anlas_chart.js";
 
 let S = null;
 let C = {};
@@ -104,9 +105,11 @@ export async function render(container, ctx) {
 
   container.append(buildPromptCard(saved));
 
-  // Row2: 左侧页签 + 右侧输出
+  // Row2: 左侧页签 + 右侧输出 (输出卡下方挂额度恢复统计折线图)
   const row2 = el("div", { class: "grid gen-layout", style: "align-items:start;" });
-  row2.append(buildLeftTabs(saved), buildRightPanel());
+  const rightCol = el("div");
+  rightCol.append(buildRightPanel(), createAnlasPanel());
+  row2.append(buildLeftTabs(saved), rightCol);
 
   container.append(row2);
   charRegion?.refresh?.();

@@ -36,6 +36,7 @@ DEFAULTS: dict[str, Any] = {
     "smtp_mail": None,
     "smtp_token": None,
     "wework_mode": False,
+    "anlas_sample_interval": 1800,  # 额度采样间隔 (秒, 默认半小时)
 }
 
 _LIST_KEYS = {"tokens"}
@@ -53,7 +54,7 @@ _BOOL_KEYS = {
     "remove_nsfw",
     "wework_mode",
 }
-_INT_KEYS = {"cool_time", "port", "smtp_num"}
+_INT_KEYS = {"cool_time", "port", "smtp_num", "anlas_sample_interval"}
 
 
 def _coerce(key: str, value: Any) -> Any:

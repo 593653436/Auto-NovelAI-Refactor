@@ -1147,3 +1147,49 @@ def get_anlas(refresh: bool = False):
         if tokens:
             anlas, remains = tokens[0]["anlas"], tokens[0]["remains"]
     return {"anlas": anlas, "remains": remains, "tokens": tokens}
+
+
+@router.get("/anlas/history")
+def get_anlas_history(hours: float = 24):
+    """额度采样历史 (折线图数据) + 每个 Token 的恢复速度统计。
+
+    - hours: 回看时长 (小时), 默认 24; 传 0 或负数表示全部
+    - 实测速度: 对采样点做最小二乘拟合, 换算 %/小时
+    - 预测速度: 接口给出的 usage.timeUntilNextPercent 推算 (3600/该秒数)
+    """
+    from utils.services import anlas_history
+
+    data = anlas_history.samples(hours if hours and hours > 0 else None)
+    return {
+        "samples": data,
+        "stats": anlas_history.compute_stats(data),
+        "interval": anlas_history.interval_seconds(),
+        "file": str(anlas_history.HISTORY_FILE),
+    }
+
+
+@router.post("/anlas/sample")
+def post_anlas_sample():
+    """立即采样一次 (纯查询接口, 不消耗额度)。"""
+    from utils.services import anlas_history
+
+    sample = anlas_history.take_sample("manual")
+    if not sample:
+        return {"ok": False, "message": "采样失败 (Token 无效或网络异常, 详见日志)"}
+    return {"ok": True, "sample": sample}
+
+
+@router.post("/anlas/interval")
+def post_anlas_interval(payload: dict = None):
+    """设置采样间隔 (分钟)。最小 1 分钟。"""
+    from utils.config import env
+    from utils.services import anlas_history  # noqa: F401  (确保模块已加载)
+
+    minutes = (payload or {}).get("minutes")
+    try:
+        minutes = int(minutes)
+    except (TypeError, ValueError):
+        return {"ok": False, "message": "间隔必须是整数分钟"}
+    minutes = max(1, minutes)
+    env.update({"anlas_sample_interval": minutes * 60})
+    return {"ok": True, "interval": env.anlas_sample_interval, "minutes": minutes}

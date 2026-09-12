@@ -1,0 +1,394 @@
+// ============================================================
+// 额度恢复统计面板: 折线图 + 恢复速度估算
+//   NovelAI 的额度恢复规则未公开 (黑箱), 后端定时调用纯查询接口
+//   (/user/subscription, 不消耗额度) 采样落盘, 这里画折线并统计
+//   "每小时恢复多少额度", 同时给出接口自带的 timeUntilNextPercent 推算值作对照。
+//   纯 Canvas 绘制, 无第三方依赖, 颜色跟随 WebUI 主题。
+// ============================================================
+import { el, toast } from "./ui.js";
+import { get, post } from "./api.js";
+
+/** 令牌配色 (与主题色系一致) */
+const LINE_COLORS = ["#8b5cf6", "#22c55e", "#f59e0b", "#ef4444", "#06b6d4"];
+
+/** 两条线的固定配色: 额度(紫, 左轴) / 点数(橙, 右轴) */
+const COLOR_USAGE = "#8b5cf6";
+const COLOR_ANLAS = "#f59e0b";
+
+/** 点数显示: 大数加千分位 */
+const fmtNum = (v) => {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "—";
+  return Math.abs(n) >= 1000 ? n.toLocaleString("zh-CN", { maximumFractionDigits: 0 }) : String(Math.round(n * 100) / 100);
+};
+
+function themeColors() {
+  const cs = getComputedStyle(document.documentElement);
+  const v = (name, fallback) => (cs.getPropertyValue(name) || "").trim() || fallback;
+  const dark = document.documentElement.getAttribute("data-theme") === "dark";
+  return {
+    dark,
+    text2: v("--text-2", dark ? "#9aa0ae" : "#6b7280"),
+    border: v("--border", dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.1)"),
+    grid: dark ? "rgba(255,255,255,0.14)" : "rgba(0,0,0,0.11)",
+  };
+}
+
+const fmtTime = (t) => {
+  const d = new Date(t * 1000);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+};
+const fmtDateTime = (t) => {
+  const d = new Date(t * 1000);
+  return `${d.getMonth() + 1}/${d.getDate()} ${fmtTime(t)}`;
+};
+/** 速度显示: <0 表示在消耗 (生成中), >0 表示在恢复 */
+function fmtRate(v) {
+  if (v === null || v === undefined || !Number.isFinite(Number(v))) return "—";
+  const n = Number(v);
+  return `${n >= 0 ? "+" : ""}${n.toFixed(2)} %/小时`;
+}
+
+/** 画折线图: 横轴时间; 左轴=额度%(0-100 固定), 右轴=点数(自适应); 两条线 */
+function drawChart(canvas, stats, hours, selIdx = 0) {
+  const wrap = canvas.parentElement;
+  const cssW = Math.max(240, wrap.clientWidth);
+  const cssH = 210;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(cssW * dpr);
+  canvas.height = Math.round(cssH * dpr);
+  canvas.style.width = cssW + "px";
+  canvas.style.height = cssH + "px";
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  const th = themeColors();
+  const padL = 36;
+  const padR = 62; // 右侧留出点数刻度 + 末端标签
+  const padT = 24; // 顶部留给图例
+  const padB = 20;
+  const plotW = cssW - padL - padR;
+  const plotH = cssH - padT - padB;
+
+  const list = stats || [];
+  const sel = list.length ? list[Math.max(0, Math.min(list.length - 1, selIdx))] : null;
+  const usagePts = sel ? [...(sel.points || [])].sort((a, b) => a[0] - b[0]) : [];
+  const anlasPts = sel ? [...(sel.anlas_points || [])].sort((a, b) => a[0] - b[0]) : [];
+
+  const allTs = [...usagePts.map((p) => p[0]), ...anlasPts.map((p) => p[0])];
+  let t0 = allTs.length ? Math.min(...allTs) : 0;
+  let t1 = allTs.length ? Math.max(...allTs) : 0;
+  if (t1 - t0 < 60) t1 = t0 + 60; // 单点/极短跨度时给个最小窗口
+
+  // 选了时间范围时按固定窗口显示 (随时间推移逐渐填满);
+  // 但数据跨度不足 1 小时时先贴着数据画, 避免刚开始记录时全挤在右边缘
+  if (hours > 0 && (t1 - t0) / 3600 >= 1) {
+    t0 = Math.max(t0, t1 - hours * 3600);
+  }
+
+  const X = (t) => padL + ((t - t0) / (t1 - t0)) * plotW;
+  // 左轴: 额度% (固定 0-100)
+  const Y = (p) => padT + (1 - Math.max(0, Math.min(100, p)) / 100) * plotH;
+  // 右轴: 点数 (按数据自适应, 留 8% 余量)
+  const avals = anlasPts.map((p) => Number(p[1])).filter((v) => Number.isFinite(v));
+  let aMin = avals.length ? Math.min(...avals) : 0;
+  let aMax = avals.length ? Math.max(...avals) : 1;
+  if (aMax - aMin < 1) {
+    const pad = Math.max(1, Math.abs(aMax) * 0.02);
+    aMin -= pad;
+    aMax += pad;
+  } else {
+    const pad = (aMax - aMin) * 0.08;
+    aMin -= pad;
+    aMax += pad;
+  }
+  const Y2 = (v) => padT + (1 - (Number(v) - aMin) / (aMax - aMin)) * plotH;
+
+  // 网格 + Y 轴刻度 (0/25/50/75/100)
+  ctx.strokeStyle = th.grid;
+  ctx.lineWidth = 1;
+  ctx.fillStyle = th.text2;
+  ctx.font = "10px system-ui, sans-serif";
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  [0, 25, 50, 75, 100].forEach((p) => {
+    const y = Y(p);
+    ctx.beginPath();
+    ctx.moveTo(padL, y);
+    ctx.lineTo(padL + plotW, y);
+    ctx.stroke();
+    ctx.fillText(`${p}%`, padL - 6, y);
+  });
+
+  // X 轴时间刻度: 首/中/尾 3 个 (首尾贴边对齐, 避免被画布裁掉)
+  // 跨度不足 1 小时时精确到秒, 否则同一分钟内的多个采样会显示成重复标签
+  const fmtTick = (t1 - t0 < 3600)
+    ? (t) => {
+      const d = new Date(t * 1000);
+      const p = (n) => String(n).padStart(2, "0");
+      return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    }
+    : fmtDateTime;
+  ctx.textBaseline = "top";
+  [
+    [t0, "left", padL],
+    [(t0 + t1) / 2, "center", padL + plotW / 2],
+    [t1, "right", padL + plotW],
+  ].forEach(([t, align, x]) => {
+    ctx.textAlign = align;
+    ctx.fillText(fmtTick(t), x, padT + plotH + 5);
+  });
+
+  // 右轴: 点数刻度 (上/中/下 3 个, 橙色, 与点数线同色)
+  ctx.fillStyle = COLOR_ANLAS;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  [aMax, (aMin + aMax) / 2, aMin].forEach((v) => {
+    ctx.fillText(fmtNum(v), padL + plotW + 6, Y2(v));
+  });
+
+  // 图例 (顶部): 额度线 / 点数线
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "left";
+  const legendY = padT / 2 + 1;
+  const legend = [
+    [COLOR_USAGE, "额度 %"],
+    [COLOR_ANLAS, "点数"],
+  ];
+  let lx = padL;
+  legend.forEach(([color, text]) => {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(lx, legendY);
+    ctx.lineTo(lx + 14, legendY);
+    ctx.stroke();
+    ctx.fillStyle = th.text2;
+    ctx.font = "10px system-ui, sans-serif";
+    ctx.fillText(text, lx + 18, legendY);
+    lx += 62;
+  });
+  if (sel) {
+    ctx.fillStyle = th.text2;
+    ctx.fillText(`Token ${sel.index + 1} ${sel.token || ""}`, lx + 4, legendY);
+  }
+
+  if (!usagePts.length && !anlasPts.length) {
+    ctx.fillStyle = th.text2;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("暂无采样数据", padL + plotW / 2, padT + plotH / 2);
+    return;
+  }
+
+  // 两条线: 额度%(左轴) + 点数(右轴)
+  const drawSeries = (pts, color, yFn, endLabel) => {
+    if (!pts.length) return;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.8;
+    ctx.beginPath();
+    pts.forEach(([t, v], k) => {
+      const x = X(t);
+      const y = yFn(Number(v));
+      if (k === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+
+    // 数据点 (最后一个高亮)
+    pts.forEach(([t, v], k) => {
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(X(t), yFn(Number(v)), k === pts.length - 1 ? 3.2 : 2, 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    // 末端标签: 画在末点左上方, 避免与右侧点数刻度打架
+    const [lt, lv] = pts[pts.length - 1];
+    ctx.fillStyle = color;
+    ctx.font = "10px system-ui, sans-serif";
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    ctx.fillText(endLabel(lv), X(lt) - 4, yFn(Number(lv)) - 9);
+  };
+
+  drawSeries(usagePts, COLOR_USAGE, (v) => Y(Number(v)), (v) => `${v}%`);
+  drawSeries(anlasPts, COLOR_ANLAS, (v) => Y2(v), (v) => fmtNum(v));
+}
+
+/** 额度统计面板 (放在输出图片卡下方) */
+export function createAnlasPanel() {
+  let stats = [];
+  let hours = 24;
+  let intervalSec = 1800;
+  let selIdx = 0; // 当前查看的 Token 序号
+
+  // Token 切换 (各 Token 额度独立; 图为该 Token 的 额度% + 点数 两条线)
+  const tokenSel = el("select", { class: "btn btn-sm", style: "padding:2px 6px;", title: "选择要查看的 Token" });
+  tokenSel.addEventListener("change", () => {
+    selIdx = Number(tokenSel.value) || 0;
+    drawChart(canvas, stats, hours, selIdx);
+  });
+
+  const canvas = el("canvas", { style: "display:block;width:100%;height:210px;" });
+  const chartWrap = el("div", { style: "position:relative;margin:6px 0 2px;" }, [canvas]);
+  const summary = el("div", { class: "anlas-summary", style: "font-size:12px;line-height:1.7;" });
+  const meta = el("div", { class: "muted", style: "font-size:11px;margin-top:6px;" });
+
+  // 控件行
+  const rangeSel = el("select", { class: "btn btn-sm", style: "padding:2px 6px;" });
+  [["6", "近 6 小时"], ["24", "近 24 小时"], ["72", "近 3 天"], ["168", "近 7 天"], ["0", "全部"]].forEach(([v, t]) => {
+    const o = el("option", { value: v, text: t });
+    if (v === "24") o.selected = true;
+    rangeSel.append(o);
+  });
+  rangeSel.addEventListener("change", () => {
+    hours = Number(rangeSel.value) || 0;
+    refresh();
+  });
+
+  const intervalInput = el("input", {
+    type: "number", min: "1", max: "1440", value: "30",
+    style: "width:58px;padding:2px 4px;", title: "自动采样间隔 (分钟)",
+  });
+  const saveIntervalBtn = el("button", { class: "btn btn-sm", text: "保存间隔" });
+  saveIntervalBtn.addEventListener("click", async () => {
+    const minutes = Number(intervalInput.value);
+    if (!Number.isFinite(minutes) || minutes < 1) {
+      toast("间隔至少 1 分钟", "warning");
+      return;
+    }
+    try {
+      const r = await post("/api/anlas/interval", { minutes });
+      if (r.ok) {
+        intervalSec = r.interval;
+        toast(`已设为每 ${r.minutes} 分钟采样一次`, "success");
+        renderMeta();
+      } else {
+        toast(r.message || "保存失败", "error");
+      }
+    } catch (e) {
+      toast("保存失败: " + e.message, "error");
+    }
+  });
+
+  const sampleBtn = el("button", { class: "btn btn-sm", text: "📍 立即采样" });
+  sampleBtn.addEventListener("click", async () => {
+    sampleBtn.disabled = true;
+    const old = sampleBtn.textContent;
+    sampleBtn.textContent = "采样中…";
+    try {
+      const r = await post("/api/anlas/sample", {});
+      toast(r.ok ? "已记录一次额度采样" : (r.message || "采样失败"), r.ok ? "success" : "error");
+      await refresh();
+    } catch (e) {
+      toast("采样失败: " + e.message, "error");
+    } finally {
+      sampleBtn.disabled = false;
+      sampleBtn.textContent = old;
+    }
+  });
+
+  const refreshBtn = el("button", { class: "btn btn-sm", text: "🔄 刷新" });
+  refreshBtn.addEventListener("click", () => refresh());
+
+  const controls = el("div", { style: "display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:8px;" }, [
+    el("span", { style: "font-size:12px;", text: "Token" }),
+    tokenSel,
+    el("span", { style: "font-size:12px;margin-left:4px;", text: "范围" }),
+    rangeSel,
+    el("span", { style: "font-size:12px;margin-left:4px;", text: "采样间隔(分钟)" }),
+    intervalInput,
+    saveIntervalBtn,
+    sampleBtn,
+    refreshBtn,
+  ]);
+
+  const card = el("div", { class: "card", style: "margin-top:12px;" }, [
+    el("div", { class: "card-title" }, ["📈 额度恢复统计"]),
+    summary,
+    chartWrap,
+    meta,
+    controls,
+  ]);
+
+  function renderMeta() {
+    const mins = Math.round(intervalSec / 60);
+    meta.textContent =
+      `每 ${mins} 分钟自动采样一次 (后台记录, 关页面也在记) · 已用 ${stats[0]?.samples || 0} 个采样点` +
+      (stats.length ? "" : " · 点「立即采样」开始");
+  }
+
+  function renderSummary() {
+    summary.replaceChildren();
+    if (!stats.length) {
+      summary.append(el("span", { class: "muted", text: "还没有数据。额度是黑箱的话, 先记一段时间才能算出恢复速度。" }));
+      return;
+    }
+    const marks = ["①", "②", "③", "④", "⑤"];
+    stats.forEach((s, i) => {
+      const color = LINE_COLORS[i % LINE_COLORS.length];
+      const rate = s.measured_per_hour;
+      const pred = s.predicted_per_hour;
+      const row = el("div", { style: "display:flex;flex-wrap:wrap;gap:6px;align-items:baseline;" }, [
+        el("span", { style: `color:${color};font-weight:600;`, text: `${marks[i] || i + 1}${s.token || ""}` }),
+        el("span", { text: `当前 ${s.remains ?? "?"}% · 点数 ${s.anlas ?? "?"}` }),
+        el("span", { style: "color:var(--text-2);", text: `实测 ${fmtRate(rate)}` }),
+        el("span", { style: "color:var(--text-2);", text: `接口推算 ${fmtRate(pred)}` }),
+        s.anlas_delta !== null && s.anlas_delta !== undefined && Number(s.anlas_delta) !== 0
+          ? el("span", { style: "color:var(--text-2);", text: `点数区间变化 ${s.anlas_delta > 0 ? "+" : ""}${s.anlas_delta}` })
+          : null,
+        el("span", { style: "color:var(--text-2);", text: `${s.samples} 点 / ${s.span_hours}h` }),
+      ].filter(Boolean));
+      summary.append(row);
+    });
+    summary.append(el("div", {
+      class: "muted",
+      style: "font-size:11px;margin-top:2px;",
+      text: "实测 = 对采样点做最小二乘拟合; 接口推算 = 3600 ÷ timeUntilNextPercent。用量为整数 %, 跨度太短时实测值可能为 0。",
+    }));
+  }
+
+  async function refresh() {
+    try {
+      const d = await get("/api/anlas/history?hours=" + (hours || 0));
+      stats = d.stats || [];
+      if (d.interval) {
+        intervalSec = d.interval;
+        intervalInput.value = String(Math.round(d.interval / 60));
+      }
+      renderSummary();
+      renderMeta();
+      // 重建 Token 下拉
+      tokenSel.replaceChildren();
+      stats.forEach((s, i) => {
+        tokenSel.append(el("option", {
+          value: String(i),
+          text: `${i + 1}. ${s.token || "?"} (${s.remains ?? "?"}%)`,
+        }));
+      });
+      selIdx = Math.min(selIdx, Math.max(0, stats.length - 1));
+      tokenSel.value = String(selIdx);
+      drawChart(canvas, stats, hours, selIdx);
+      // 首次渲染时面板可能还没插入文档 (宽度为 0), 下一帧再画一次
+      requestAnimationFrame(() => drawChart(canvas, stats, hours, selIdx));
+    } catch (e) {
+      summary.textContent = "读取额度历史失败: " + e.message;
+    }
+  }
+
+  // 尺寸变化时重绘 (面板宽度随布局变化)
+  window.addEventListener("resize", () => drawChart(canvas, stats, hours, selIdx));
+  try {
+    new ResizeObserver(() => drawChart(canvas, stats, hours, selIdx)).observe(chartWrap);
+  } catch { /* 旧浏览器忽略 */ }
+
+  refresh();
+  // 页面打开期间定期刷新 (后端一直在采样, 这里只是把新点画出来)
+  setInterval(() => {
+    if (document.visibilityState === "visible") refresh();
+  }, 120000);
+
+  return card;
+}
