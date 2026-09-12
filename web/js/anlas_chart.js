@@ -33,6 +33,7 @@ function themeColors() {
     text2: v("--text-2", dark ? "#9aa0ae" : "#6b7280"),
     border: v("--border", dark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.1)"),
     grid: dark ? "rgba(255,255,255,0.14)" : "rgba(0,0,0,0.11)",
+    bg: v("--panel-solid", dark ? "#161821" : "#ffffff"),
   };
 }
 
@@ -51,8 +52,10 @@ function fmtRate(v) {
   return `${n >= 0 ? "+" : ""}${n.toFixed(2)} %/小时`;
 }
 
-/** 画折线图: 横轴时间; 左轴=额度%(0-100 固定), 右轴=点数(自适应); 两条线 */
-function drawChart(canvas, stats, hours, selIdx = 0) {
+/** 画折线图: 横轴时间; 左轴=额度%(0-100 固定), 右轴=点数(自适应); 两条线
+ *  hoverT: 鼠标悬停的采样时刻 (整数秒), 传入时画竖参考线并放大该时刻的数据点
+ */
+function drawChart(canvas, stats, hours, selIdx = 0, hoverT = null) {
   const wrap = canvas.parentElement;
   const cssW = Math.max(240, wrap.clientWidth);
   const cssH = 210;
@@ -262,6 +265,50 @@ function drawChart(canvas, stats, hours, selIdx = 0) {
       drawSeries(s.anlas, s.anlasColor, (v) => Y2(v), (v) => `${fmtNum(v)}`, false, 11);
     }
   });
+
+  // 供悬停提示使用: 保存坐标换算与"时刻→数值"映射 (每次重绘刷新)
+  canvas._anrGeom = {
+    t0, t1, padL, padT, plotW, plotH, showAll,
+    times: [...new Set(allTs)].sort((a, b) => a - b),
+    series: series.map((s) => ({
+      mark: s.mark,
+      color: s.color,
+      anlasColor: s.anlasColor,
+      usage: new Map(s.usage.map((p) => [p[0], p[1]])),
+      anlas: new Map(s.anlas.map((p) => [p[0], p[1]])),
+    })),
+  };
+
+  // 悬停: 竖参考线 + 放大该时刻的数据点
+  if (hoverT !== null && canvas._anrGeom.times.includes(hoverT)) {
+    const hx = X(hoverT);
+    ctx.save();
+    ctx.strokeStyle = th.text2;
+    ctx.globalAlpha = 0.6;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(hx, padT);
+    ctx.lineTo(hx, padT + plotH);
+    ctx.stroke();
+    ctx.restore();
+
+    const drawHit = (pts, yFn, color) => {
+      const hit = pts.find((p) => p[0] === hoverT);
+      if (!hit) return;
+      const hy = yFn(Number(hit[1]));
+      ctx.beginPath();
+      ctx.fillStyle = color;
+      ctx.arc(hx, hy, 4.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = th.bg;
+      ctx.stroke();
+    };
+    series.forEach((s) => {
+      drawHit(s.usage, (v) => Y(Number(v)), s.color);
+      drawHit(s.anlas, (v) => Y2(v), s.anlasColor);
+    });
+  }
 }
 
 /** 额度统计面板 (放在输出图片卡下方) */
@@ -282,6 +329,69 @@ export function createAnlasPanel() {
   const chartWrap = el("div", { style: "position:relative;margin:6px 0 2px;" }, [canvas]);
   const summary = el("div", { class: "anlas-summary", style: "font-size:12px;line-height:1.7;" });
   const meta = el("div", { class: "muted", style: "font-size:11px;margin-top:6px;" });
+
+  // 悬停提示框: 移到采样点附近时显示该时刻各 Token 的额度/点数
+  const tip = el("div", {
+    style: "position:absolute;display:none;pointer-events:none;z-index:6;padding:6px 9px;border-radius:6px;" +
+      "font-size:11px;line-height:1.6;white-space:nowrap;background:var(--panel-solid,#fff);" +
+      "border:1px solid var(--border,rgba(0,0,0,.15));box-shadow:0 3px 12px rgba(0,0,0,.18);color:var(--text,inherit);",
+  });
+  chartWrap.append(tip);
+
+  let hoverT = null; // 当前悬停的采样时刻
+
+  function hideTip() {
+    tip.style.display = "none";
+    if (hoverT !== null) {
+      hoverT = null;
+      drawChart(canvas, stats, hours, selIdx);
+    }
+  }
+
+  function renderTip(t, px) {
+    const g = canvas._anrGeom;
+    const d = new Date(t * 1000);
+    const p = (n) => String(n).padStart(2, "0");
+    const rows = [`<b>${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}</b>`];
+    g.series.forEach((s) => {
+      const u = s.usage.has(t) ? `${s.usage.get(t)}%` : "—";
+      const a = s.anlas.has(t) ? fmtNum(s.anlas.get(t)) : "—";
+      rows.push(
+        `<span style="color:${s.color};">■</span> ${g.showAll ? s.mark + " " : ""}额度 ${u} · 点数 ${a}`
+      );
+    });
+    tip.innerHTML = rows.join("<br>");
+    tip.style.display = "block";
+    const w = tip.offsetWidth;
+    const wrapW = chartWrap.clientWidth;
+    let left = px + 14;
+    if (left + w > wrapW - 4) left = Math.max(4, px - w - 14);
+    tip.style.left = left + "px";
+    tip.style.top = "4px";
+  }
+
+  canvas.addEventListener("mousemove", (e) => {
+    const g = canvas._anrGeom;
+    if (!g || !g.times.length) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    // 屏幕 x → 时间 → 最近的采样时刻
+    const t = g.t0 + ((x - g.padL) / g.plotW) * (g.t1 - g.t0);
+    let best = g.times[0];
+    let bd = Infinity;
+    g.times.forEach((tt) => {
+      const d = Math.abs(tt - t);
+      if (d < bd) { bd = d; best = tt; }
+    });
+    const px = g.padL + ((best - g.t0) / (g.t1 - g.t0)) * g.plotW;
+    if (Math.abs(px - x) > 70) { hideTip(); return; } // 离采样点太远就不提示
+    if (best !== hoverT) {
+      hoverT = best;
+      drawChart(canvas, stats, hours, selIdx, hoverT);
+    }
+    renderTip(best, px);
+  });
+  canvas.addEventListener("mouseleave", hideTip);
 
   // 控件行
   const rangeSel = el("select", { class: "btn btn-sm", style: "padding:2px 6px;" });
