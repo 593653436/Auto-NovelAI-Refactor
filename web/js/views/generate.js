@@ -912,11 +912,15 @@ async function updateAnlasBadge(refresh = false) {
           .map((t, i) => {
             const a = Number(t.anlas);
             const r = Number(t.remains);
-            const info = `${a >= 0 ? a + " 点" : "查询失败"} · ${r >= 0 ? r + "%" : "?"}`;
+            const secs = Number(t.next_percent_in);
+            const wait = Number.isFinite(secs) && secs > 0
+              ? ` (约 ${secs >= 3600 ? (secs / 3600).toFixed(1) + " 小时" : Math.ceil(secs / 60) + " 分钟"}后 +1%)`
+              : "";
+            const info = `${a >= 0 ? a + " 点" : "查询失败"} · 用量 ${r >= 0 ? r + "%" : "?"}${wait}`;
             return `${i + 1}. ${t.token || "?"}: ${info}`;
           })
           .join("\n") +
-        "\n\n点击可再次查询 (纯查询接口, 不消耗额度)";
+        "\n\n用量为 V5 起的\u201c用量上限电池\u201d百分比 (会自动回血)\n点击可再次查询 (纯查询接口, 不消耗额度)";
     } else {
       const src = list ? list[0] : data;
       const a = Number(src.anlas);

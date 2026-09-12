@@ -43,10 +43,8 @@ def get_last_anlas() -> tuple:
     return getattr(_anlas_ctx, "anlas", -1), getattr(_anlas_ctx, "remains", -1)
 
 
-def inquire_anlas():
-    """查询剩余点数与用量。"""
-    if env.skip_inquire_anlas:
-        return "skipped", "skipped"
+def _subscription_body() -> dict | None:
+    """调用 NovelAI 订阅接口 (纯查询 /user/subscription, 不消耗额度), 返回响应体; 失败返回 None。"""
     try:
         rep = requests.get(
             "https://image.novelai.net/user/subscription",
@@ -55,33 +53,74 @@ def inquire_anlas():
             timeout=(15, 30),
         )
         if rep.status_code == 200:
-            body = rep.json()
-            remains = body["usage"]["percent"]
-            anlas = body["trainingStepsLeft"]["fixedTrainingStepsLeft"]
-            if anlas == 0:
-                anlas = body["trainingStepsLeft"]["purchasedTrainingSteps"]
-            return anlas, remains
-        return -1, -1
+            return rep.json()
+        return None
     except Exception as e:
         logger.debug(f"查询剩余点数失败 (不影响生成): {e}")
+        return None
+
+
+def _parse_anlas(body: dict) -> tuple:
+    """从订阅响应体解析 (剩余点数, 剩余用量%)。
+
+    剩余点数 = subscription Anlas (fixedTrainingStepsLeft, 为 0 时用 purchasedTrainingSteps);
+    剩余用量 = V5 起的用量上限\"电池\"百分比 (usage.percent, 会自动回血)。
+    """
+    remains = body["usage"]["percent"]
+    anlas = body["trainingStepsLeft"]["fixedTrainingStepsLeft"]
+    if anlas == 0:
+        anlas = body["trainingStepsLeft"]["purchasedTrainingSteps"]
+    return anlas, remains
+
+
+def inquire_anlas():
+    """查询剩余点数与用量。"""
+    if env.skip_inquire_anlas:
+        return "skipped", "skipped"
+    body = _subscription_body()
+    if not body:
+        return -1, -1
+    try:
+        return _parse_anlas(body)
+    except Exception as e:
+        logger.debug(f"解析剩余点数失败: {e}")
         return -1, -1
 
 
 def inquire_anlas_all() -> list[dict]:
     """逐个 Token 查询剩余点数/用量 (纯查询接口 /user/subscription, 不消耗任何额度)。
 
-    多 Token 时各通道额度独立, 需要分别查询; 返回每项 {index, token(打码), anlas, remains}。
+    多 Token 时各通道额度独立, 需要分别查询;
+    返回每项 {index, token(打码), anlas, remains, next_percent_in, negative}。
+    next_percent_in = 距离用量电池 +1% 的秒数 (接口 usage.timeUntilNextPercent)。
     """
     from utils.tokens import get_tokens, mask_token, pop_thread_token, set_thread_token
+
+    if env.skip_inquire_anlas:
+        return []
 
     out: list[dict] = []
     for i, tok in enumerate(get_tokens()):
         set_thread_token(tok)
         try:
-            anlas, remains = inquire_anlas()
+            body = _subscription_body()
         finally:
             pop_thread_token()
-        out.append({"index": i, "token": mask_token(tok), "anlas": anlas, "remains": remains})
+        item = {"index": i, "token": mask_token(tok), "anlas": -1, "remains": -1,
+                "next_percent_in": None, "negative": None}
+        if body:
+            try:
+                anlas, remains = _parse_anlas(body)
+                usage = body.get("usage") or {}
+                item.update({
+                    "anlas": anlas,
+                    "remains": remains,
+                    "next_percent_in": usage.get("timeUntilNextPercent"),
+                    "negative": usage.get("isNegative"),
+                })
+            except Exception as e:
+                logger.debug(f"解析 Token#{i} 剩余点数失败: {e}")
+        out.append(item)
     return out
 
 
