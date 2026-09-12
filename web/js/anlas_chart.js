@@ -10,6 +10,8 @@ import { get, post } from "./api.js";
 
 /** 令牌配色 (与主题色系一致) */
 const LINE_COLORS = ["#8b5cf6", "#22c55e", "#f59e0b", "#ef4444", "#06b6d4"];
+/** 圈码序号 (与徽标、统计行一致) */
+const MARKS = ["①", "②", "③", "④", "⑤", "⑥"];
 
 /** 两条线的固定配色: 额度(紫, 左轴) / 点数(橙, 右轴) */
 const COLOR_USAGE = "#8b5cf6";
@@ -72,11 +74,26 @@ function drawChart(canvas, stats, hours, selIdx = 0) {
   const plotH = cssH - padT - padB;
 
   const list = stats || [];
-  const sel = list.length ? list[Math.max(0, Math.min(list.length - 1, selIdx))] : null;
-  const usagePts = sel ? [...(sel.points || [])].sort((a, b) => a[0] - b[0]) : [];
-  const anlasPts = sel ? [...(sel.anlas_points || [])].sort((a, b) => a[0] - b[0]) : [];
+  // selIdx < 0 = 查看全部 Token (多 Token 时 2×N 条线); 只有 1 个 Token 时等同单选
+  const showAll = selIdx < 0 && list.length > 1;
+  const shown = showAll
+    ? list
+    : (list.length ? [list[Math.max(0, Math.min(list.length - 1, selIdx))]] : []);
+  const series = shown.map((s, i) => ({
+    stat: s,
+    // 单选时: 额度=紫 / 点数=橙; 全部时: 每个 Token 一种颜色, 额度实线 / 点数虚线
+    color: showAll ? LINE_COLORS[i % LINE_COLORS.length] : COLOR_USAGE,
+    anlasColor: showAll ? LINE_COLORS[i % LINE_COLORS.length] : COLOR_ANLAS,
+    usage: [...(s.points || [])].sort((a, b) => a[0] - b[0]),
+    anlas: [...(s.anlas_points || [])].sort((a, b) => a[0] - b[0]),
+    mark: MARKS[i] || String(i + 1),
+  }));
 
-  const allTs = [...usagePts.map((p) => p[0]), ...anlasPts.map((p) => p[0])];
+  const allTs = [];
+  series.forEach((s) => {
+    s.usage.forEach((p) => allTs.push(p[0]));
+    s.anlas.forEach((p) => allTs.push(p[0]));
+  });
   let t0 = allTs.length ? Math.min(...allTs) : 0;
   let t1 = allTs.length ? Math.max(...allTs) : 0;
   if (t1 - t0 < 60) t1 = t0 + 60; // 单点/极短跨度时给个最小窗口
@@ -90,8 +107,10 @@ function drawChart(canvas, stats, hours, selIdx = 0) {
   const X = (t) => padL + ((t - t0) / (t1 - t0)) * plotW;
   // 左轴: 额度% (固定 0-100)
   const Y = (p) => padT + (1 - Math.max(0, Math.min(100, p)) / 100) * plotH;
-  // 右轴: 点数 (按数据自适应, 留 8% 余量)
-  const avals = anlasPts.map((p) => Number(p[1])).filter((v) => Number.isFinite(v));
+  // 右轴: 点数 (按所有显示中的 Token 自适应, 留 8% 余量)
+  const avalsRaw = [];
+  series.forEach((s) => s.anlas.forEach((p) => avalsRaw.push(Number(p[1]))));
+  const avals = avalsRaw.filter((v) => Number.isFinite(v));
   let aMin = avals.length ? Math.min(...avals) : 0;
   let aMax = avals.length ? Math.max(...avals) : 1;
   if (aMax - aMin < 1) {
@@ -103,6 +122,16 @@ function drawChart(canvas, stats, hours, selIdx = 0) {
     aMin -= pad;
     aMax += pad;
   }
+  aMin = Math.max(0, aMin); // 点数不会为负, 避免右轴出现负刻度
+  // 右轴上限取整到友好数值 (1/2/2.5/5/10 × 10^n), 刻度读数更顺
+  const niceCeil = (v) => {
+    if (!(v > 0)) return 1;
+    const mag = Math.pow(10, Math.floor(Math.log10(v)));
+    const n = v / mag;
+    const step = n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10;
+    return step * mag;
+  };
+  aMax = niceCeil(aMax);
   const Y2 = (v) => padT + (1 - (Number(v) - aMin) / (aMax - aMin)) * plotH;
 
   // 网格 + Y 轴刻度 (0/25/50/75/100)
@@ -140,41 +169,49 @@ function drawChart(canvas, stats, hours, selIdx = 0) {
     ctx.fillText(fmtTick(t), x, padT + plotH + 5);
   });
 
-  // 右轴: 点数刻度 (上/中/下 3 个, 橙色, 与点数线同色)
-  ctx.fillStyle = COLOR_ANLAS;
+  // 右轴: 点数刻度 (上/中/下 3 个); 单选时用点数线同色, 全部模式用中性色避免"一个轴一个色"的误导
+  ctx.fillStyle = showAll ? th.text2 : COLOR_ANLAS;
   ctx.textAlign = "left";
   ctx.textBaseline = "middle";
   [aMax, (aMin + aMax) / 2, aMin].forEach((v) => {
     ctx.fillText(fmtNum(v), padL + plotW + 6, Y2(v));
   });
 
-  // 图例 (顶部): 额度线 / 点数线
+  // 图例 (顶部)
   ctx.textBaseline = "middle";
   ctx.textAlign = "left";
+  ctx.font = "10px system-ui, sans-serif";
   const legendY = padT / 2 + 1;
-  const legend = [
-    [COLOR_USAGE, "额度 %"],
-    [COLOR_ANLAS, "点数"],
-  ];
   let lx = padL;
-  legend.forEach(([color, text]) => {
+  const legendChip = (color, text, dashed = false) => {
     ctx.strokeStyle = color;
     ctx.lineWidth = 2;
+    if (dashed) ctx.setLineDash([4, 3]);
     ctx.beginPath();
     ctx.moveTo(lx, legendY);
     ctx.lineTo(lx + 14, legendY);
     ctx.stroke();
+    ctx.setLineDash([]);
     ctx.fillStyle = th.text2;
-    ctx.font = "10px system-ui, sans-serif";
     ctx.fillText(text, lx + 18, legendY);
-    lx += 62;
-  });
-  if (sel) {
+    lx += 18 + ctx.measureText(text).width + 12;
+  };
+  if (showAll) {
+    // 全部模式: 每个 Token 一种颜色, 实线=额度 / 虚线=点数
+    series.forEach((s) => legendChip(s.color, `${s.mark}${s.stat.token || "Token " + (s.stat.index + 1)}`));
+    // 线型说明用纯文字 (画灰色虚线样例会被误读成"还有第三条灰线")
     ctx.fillStyle = th.text2;
-    ctx.fillText(`Token ${sel.index + 1} ${sel.token || ""}`, lx + 4, legendY);
+    ctx.fillText("实线=额度% / 虚线=点数", lx, legendY);
+  } else {
+    legendChip(COLOR_USAGE, "额度 %");
+    legendChip(COLOR_ANLAS, "点数");
+    if (series.length) {
+      ctx.fillStyle = th.text2;
+      ctx.fillText(`Token ${series[0].stat.index + 1} ${series[0].stat.token || ""}`, lx + 2, legendY);
+    }
   }
 
-  if (!usagePts.length && !anlasPts.length) {
+  if (!allTs.length) {
     ctx.fillStyle = th.text2;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
@@ -182,11 +219,12 @@ function drawChart(canvas, stats, hours, selIdx = 0) {
     return;
   }
 
-  // 两条线: 额度%(左轴) + 点数(右轴)
-  const drawSeries = (pts, color, yFn, endLabel) => {
+  // 折线: 额度%(左轴) + 点数(右轴); 全部模式下点数线用虚线区分
+  const drawSeries = (pts, color, yFn, endLabel, dashed, labelOffset) => {
     if (!pts.length) return;
     ctx.strokeStyle = color;
     ctx.lineWidth = 1.8;
+    if (dashed) ctx.setLineDash([5, 3]);
     ctx.beginPath();
     pts.forEach(([t, v], k) => {
       const x = X(t);
@@ -195,6 +233,7 @@ function drawChart(canvas, stats, hours, selIdx = 0) {
       else ctx.lineTo(x, y);
     });
     ctx.stroke();
+    ctx.setLineDash([]);
 
     // 数据点 (最后一个高亮)
     pts.forEach(([t, v], k) => {
@@ -204,17 +243,25 @@ function drawChart(canvas, stats, hours, selIdx = 0) {
       ctx.fill();
     });
 
-    // 末端标签: 画在末点左上方, 避免与右侧点数刻度打架
+    // 末端标签: 按线型/序号错位, 避免多条线数值接近时标签叠在一起; 并钳制在图内
     const [lt, lv] = pts[pts.length - 1];
+    const ly = Math.max(padT + 7, Math.min(padT + plotH - 7, yFn(Number(lv)) + labelOffset));
     ctx.fillStyle = color;
     ctx.font = "10px system-ui, sans-serif";
     ctx.textAlign = "right";
     ctx.textBaseline = "middle";
-    ctx.fillText(endLabel(lv), X(lt) - 4, yFn(Number(lv)) - 9);
+    ctx.fillText(endLabel(lv), X(lt) - 4, ly);
   };
 
-  drawSeries(usagePts, COLOR_USAGE, (v) => Y(Number(v)), (v) => `${v}%`);
-  drawSeries(anlasPts, COLOR_ANLAS, (v) => Y2(v), (v) => fmtNum(v));
+  series.forEach((s, si) => {
+    if (showAll) {
+      drawSeries(s.usage, s.color, (v) => Y(Number(v)), (v) => `${s.mark}${v}%`, false, -10 + si * 12);
+      drawSeries(s.anlas, s.anlasColor, (v) => Y2(v), (v) => `${s.mark}${fmtNum(v)}`, true, 14 + si * 12);
+    } else {
+      drawSeries(s.usage, s.color, (v) => Y(Number(v)), (v) => `${v}%`, false, -9);
+      drawSeries(s.anlas, s.anlasColor, (v) => Y2(v), (v) => `${fmtNum(v)}`, false, 11);
+    }
+  });
 }
 
 /** 额度统计面板 (放在输出图片卡下方) */
@@ -222,7 +269,7 @@ export function createAnlasPanel() {
   let stats = [];
   let hours = 24;
   let intervalSec = 1800;
-  let selIdx = 0; // 当前查看的 Token 序号
+  let selIdx = -1; // -1 = 查看全部 Token (各 Token 一种颜色, 实线=额度 / 虚线=点数)
 
   // Token 切换 (各 Token 额度独立; 图为该 Token 的 额度% + 点数 两条线)
   const tokenSel = el("select", { class: "btn btn-sm", style: "padding:2px 6px;", title: "选择要查看的 Token" });
@@ -360,15 +407,16 @@ export function createAnlasPanel() {
       }
       renderSummary();
       renderMeta();
-      // 重建 Token 下拉
+      // 重建 Token 下拉: 首项为"全部", 之后逐个 Token
       tokenSel.replaceChildren();
+      tokenSel.append(el("option", { value: "-1", text: `全部 Token (${stats.length})` }));
       stats.forEach((s, i) => {
         tokenSel.append(el("option", {
           value: String(i),
-          text: `${i + 1}. ${s.token || "?"} (${s.remains ?? "?"}%)`,
+          text: `${MARKS[i] || i + 1} ${s.token || "?"} (${s.remains ?? "?"}% · ${s.anlas ?? "?"}点)`,
         }));
       });
-      selIdx = Math.min(selIdx, Math.max(0, stats.length - 1));
+      if (selIdx >= stats.length) selIdx = -1;
       tokenSel.value = String(selIdx);
       drawChart(canvas, stats, hours, selIdx);
       // 首次渲染时面板可能还没插入文档 (宽度为 0), 下一帧再画一次
