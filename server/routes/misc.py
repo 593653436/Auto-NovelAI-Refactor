@@ -1161,9 +1161,14 @@ def get_anlas_history(hours: float = 24):
     from utils.services import anlas_history, token_health
 
     data = anlas_history.samples(hours if hours and hours > 0 else None)
+    stats = anlas_history.compute_stats(data)
+    # 生成流水 → 每个 Token 的生成张数与"单张电量消耗"估计
+    anlas_history.estimate_cost_per_image(
+        stats, anlas_history.generation_events(hours if hours and hours > 0 else None)
+    )
     return {
         "samples": data,
-        "stats": anlas_history.compute_stats(data),
+        "stats": stats,
         "interval": anlas_history.interval_seconds(),
         "file": str(anlas_history.HISTORY_FILE),
         "skip_mode": token_health.mode(),

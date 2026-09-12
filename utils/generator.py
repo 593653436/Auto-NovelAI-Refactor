@@ -181,6 +181,13 @@ class Generator:
         anlas, remains = inquire_anlas()
         _set_last_anlas(anlas, remains)
         logger.success(f"请求成功! 剩余点数: {anlas}; 剩余用量: {remains}%")
+        # 生成记账: 用于反推"单张图消耗多少电量" (单张 <1% 时只能靠流水反推)
+        try:
+            from utils.services import anlas_history
+
+            anlas_history.record_generation(anlas, remains)
+        except Exception:  # noqa: BLE001
+            pass
 
         try:
             with zipfile.ZipFile(io.BytesIO(rep.content), mode="r") as zip_file:

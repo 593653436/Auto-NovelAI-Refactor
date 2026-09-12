@@ -19,11 +19,68 @@ from utils.config import BASE_DIR, env
 from utils.logger import logger
 
 HISTORY_FILE = BASE_DIR / "outputs" / "anlas_history.json"
+GEN_FILE = BASE_DIR / "outputs" / "anlas_gen_events.json"  # 每次成功生成的记账 (供反推单张电量消耗)
 MAX_SAMPLES = 4320  # 半小时一次 ≈ 90 天
+MAX_GEN_EVENTS = 20000
 DEFAULT_INTERVAL = 1800
 MIN_INTERVAL = 60
 _lock = threading.RLock()
 _started = False
+
+
+def record_generation(anlas=None, remains=None, note: str = "") -> None:
+    """记录一次成功生成 (时刻 + 哪个 Token + 当时余额)。
+
+    单张电量消耗小于 1% 时无法从整数读数直接看出, 必须靠"张数 + 时间段电量变化"
+    反推 (ΔB = 纯回血速率×时长 − 单张成本×张数), 因此需要这份生成流水。
+    """
+    try:
+        from utils.tokens import current_token, get_tokens, mask_token
+
+        tok = current_token()
+        tokens = get_tokens()
+        idx = tokens.index(tok) if tok and tok in tokens else -1
+        rec = {
+            "t": time.time(),
+            "index": idx,
+            "token": mask_token(tok) if tok else None,
+            "anlas": anlas,
+            "remains": remains,
+        }
+        if note:
+            rec["note"] = note
+        with _lock:
+            data = []
+            try:
+                if GEN_FILE.exists():
+                    data = json.loads(GEN_FILE.read_text(encoding="utf-8")) or []
+                    if not isinstance(data, list):
+                        data = []
+            except Exception:
+                data = []
+            data.append(rec)
+            if len(data) > MAX_GEN_EVENTS:
+                data = data[-MAX_GEN_EVENTS:]
+            GEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+            GEN_FILE.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"记录生成流水失败 (不影响生成): {e}")
+
+
+def generation_events(hours: float | None = None) -> list[dict]:
+    """生成流水 (最近 hours 小时内)。"""
+    try:
+        with _lock:
+            data = json.loads(GEN_FILE.read_text(encoding="utf-8")) if GEN_FILE.exists() else []
+    except Exception as e:
+        logger.debug(f"读取生成流水失败: {e}")
+        data = []
+    if not isinstance(data, list):
+        data = []
+    if hours:
+        cutoff = time.time() - float(hours) * 3600
+        data = [r for r in data if float(r.get("t") or 0) >= cutoff]
+    return data
 
 
 def interval_seconds() -> int:
@@ -102,6 +159,36 @@ def _slope_per_hour(points: list[tuple[float, float]]) -> float | None:
         return None
     cov = sum((p[0] - mean_t) * (p[1] - mean_v) for p in points)
     return cov / var * 3600.0
+
+
+def estimate_cost_per_image(stats: list[dict], events: list[dict]) -> None:
+    """给统计补上「窗口内生成张数」与「单张电量消耗估计」(原地修改 stats)。
+
+    原理: Δ电量 = 纯回血速率 × 时长 − 单张成本 × 张数
+      → 单张成本 = (纯回血速率 × 时长 − 电量净变化) / 张数
+    其中纯回血速率用接口推算值 (3600 / timeUntilNextPercent)。
+
+    注意: 同一账号若被他人共用 (拼车), 别人的消耗也会计入 → 估计值偏高, 是**上限**。
+    """
+    by_token: dict[int, int] = {}
+    for e in events or []:
+        by_token[int(e.get("index", -1))] = by_token.get(int(e.get("index", -1)), 0) + 1
+
+    for s in stats:
+        n = by_token.get(int(s.get("index", -2)), 0)
+        s["generated"] = n
+        s["battery_delta"] = None
+        s["cost_per_image"] = None
+        pts = s.get("points") or []
+        if n <= 0 or len(pts) < 2:
+            continue
+        span_h = float(s.get("span_hours") or 0)
+        rate = s.get("predicted_per_hour") or s.get("measured_per_hour")
+        if span_h <= 0 or not rate:
+            continue
+        db = float(pts[-1][1]) - float(pts[0][1])
+        s["battery_delta"] = round(db, 1)
+        s["cost_per_image"] = round((float(rate) * span_h - db) / n, 4)
 
 
 def compute_stats(data: list[dict]) -> list[dict]:

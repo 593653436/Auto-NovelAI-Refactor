@@ -537,6 +537,15 @@ export function createAnlasPanel() {
           ? el("span", { style: "color:var(--text-2);", text: `点数区间变化 ${s.anlas_delta > 0 ? "+" : ""}${s.anlas_delta}` })
           : null,
         el("span", { style: "color:var(--text-2);", text: `${s.samples} 点 / ${s.span_hours}h` }),
+        s.generated
+          ? el("span", {
+            style: "color:var(--text-2);",
+            text: `本窗口生成 ${s.generated} 张` +
+              (s.cost_per_image !== null && s.cost_per_image !== undefined
+                ? ` · 每张约 ${Number(s.cost_per_image).toFixed(3)}% 电量`
+                : " · 电量变化不足 1%, 暂无法估算"),
+          })
+          : null,
       ].filter(Boolean));
       summary.append(row);
     });
@@ -557,6 +566,11 @@ export function createAnlasPanel() {
       class: "muted",
       style: "font-size:11px;margin-top:2px;",
       text: "实测 = 对采样点做最小二乘拟合; 接口推算 = 3600 ÷ timeUntilNextPercent。用量为整数 %, 跨度太短时实测值可能为 0。",
+    }));
+    summary.append(el("div", {
+      class: "muted",
+      style: "font-size:11px;",
+      text: "「每张约 X% 电量」= (纯回血速率 × 时长 − 电量净变化) ÷ 张数; 电量是整数 % 且会自己回血, 需较长跨度才准; 若账号与他人共用(拼车), 别人的消耗会计入 → 该值是上限。",
     }));
   }
 
