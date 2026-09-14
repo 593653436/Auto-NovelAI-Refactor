@@ -231,6 +231,14 @@ class GenerationQueue:
         except Exception:  # noqa: BLE001
             return ""
 
+    def _manual_disabled(self, idx: int) -> bool:
+        try:
+            from utils.services import token_health
+
+            return token_health.is_manual_disabled(idx)
+        except Exception:  # noqa: BLE001
+            return False
+
     def _take_next(self, worker: _Worker) -> _Task | None:
         """通道领取队首任务 (FIFO); 通道号超出期望数量时通知其退出。
 
@@ -405,6 +413,7 @@ class GenerationQueue:
                         "task_id": w.task_id,
                         "cooldown_left": round(w.cool_left, 1) if w.status == "cooling" else 0,
                         "pause_reason": w.pause_reason,  # 非空 = 该 Token 因额度/点数耗尽被暂停
+                        "manual_disabled": self._manual_disabled(i),  # 手动停用 (采样继续, 只是不生图)
                     }
                 )
             tasks = [

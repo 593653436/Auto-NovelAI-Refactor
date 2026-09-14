@@ -1203,6 +1203,24 @@ def post_token_health_mode(payload: dict = None):
     return {"ok": True, "mode": m, "label": token_health.MODE_LABELS.get(m, "")}
 
 
+@router.post("/tokens/disable")
+def post_token_disable(payload: dict = None):
+    """手动停用/启用某个 Token 的生图 (采样照常进行, 只是不参与生图)。
+
+    body: {"index": 0, "disabled": true}
+    """
+    from utils.services import token_health
+
+    data = payload or {}
+    try:
+        index = int(data.get("index"))
+    except (TypeError, ValueError):
+        return {"ok": False, "message": "index 必须是整数"}
+    disabled = bool(data.get("disabled", True))
+    res = token_health.set_manual_disabled(index, disabled)
+    return {"ok": True, **res, "reason": token_health.reason(index)}
+
+
 @router.post("/anlas/sample")
 def post_anlas_sample():
     """立即采样一次 (纯查询接口, 不消耗额度)。"""

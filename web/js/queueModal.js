@@ -46,15 +46,26 @@ function laneNode(w) {
     running: ["🟢", "生成中"],
     cooling: ["❄️", `冷却中 ${(w.cooldown_left || 0).toFixed(1)}s`],
     idle: ["💤", "空闲"],
+    paused: ["⏸", `已暂停${w.pause_reason ? ": " + w.pause_reason : ""}`],
   };
   const [icon, text] = statusMap[w.status] || ["·", w.status];
   const runningTask = (snapshot?.tasks || []).find((t) => t.id === w.task_id && t.status === "running");
   const desc = runningTask ? `: ${runningTask.label}` : "";
+  const off = !!w.manual_disabled;
   return el("div", { class: `queue-lane lane-${w.status}` }, [
     el("span", { class: "queue-lane-icon", text: icon }),
     el("span", { class: "queue-lane-name", text: `通道 ${w.index + 1}` }),
     el("span", { class: "queue-lane-token", text: w.token || "未配置 Token" }),
     el("span", { class: "queue-lane-status", text: text + desc }),
+    // 手动停用: 只影响生图调度, 采样与统计照常进行
+    el("button", {
+      class: "qbtn" + (off ? " qbtn-danger" : ""),
+      text: off ? "▶ 启用" : "⏸ 停用",
+      title: off
+        ? "恢复该 Token 参与生图"
+        : "停用该 Token: 不再用它生成图片 (额度采样与统计照常进行)",
+      onclick: () => toggleDisable(w.index, !off),
+    }),
   ]);
 }
 
@@ -167,6 +178,12 @@ const cancelTask = (id) => apply(() => post("/api/queue/cancel", { id }), "已�
 const stopTask = (id) => apply(() => post("/api/queue/stop", { id }), "已发送停止信号");
 const clearQueue = () => apply(() => post("/api/queue/clear", {}), "已清空排队任务");
 const refresh = () => apply(() => get("/api/queue"));
+/** 手动停用/启用某个 Token 的生图 (采样照常, 只是不参与生图) */
+const toggleDisable = (index, disabled) =>
+  apply(
+    () => post("/api/tokens/disable", { index, disabled }).then(() => get("/api/queue")),
+    disabled ? "已停用该 Token 的生图 (采样与统计继续)" : "已恢复该 Token 参与生图"
+  );
 
 // ---------------- 弹窗开关 ----------------
 

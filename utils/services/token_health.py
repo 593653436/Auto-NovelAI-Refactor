@@ -31,6 +31,28 @@ _lock = threading.RLock()
 # index -> {usable, reason, remains, anlas, checked_at, source}
 _records: dict[int, dict] = {}
 _index_by_token: dict[str, int] = {}
+# 手动停用的 Token 序号: 采样照常进行, 只是不参与生图 (面板/队列弹窗可切换)
+_manual: set[int] = set()
+
+
+def is_manual_disabled(index: int) -> bool:
+    with _lock:
+        return int(index) in _manual
+
+
+def set_manual_disabled(index: int, disabled: bool) -> dict:
+    """手动停用/启用某个 Token 的生图 (采样不受影响)。"""
+    idx = int(index)
+    with _lock:
+        if disabled:
+            _manual.add(idx)
+        else:
+            _manual.discard(idx)
+        rec = dict(_records.get(idx) or {})
+    # 立即按新状态重判一次, 队列与面板无需等下一轮采样
+    update(idx, rec.get("anlas"), rec.get("remains"), "manual", rec.get("active"))
+    logger.warning(f"Token#{idx} 已{'手动停用' if disabled else '手动启用'}生图 (采样继续)")
+    return {"index": idx, "manual_disabled": disabled}
 
 
 def mode() -> str:
@@ -54,12 +76,14 @@ def set_mode(m: str) -> str:
     return m
 
 
-def _evaluate(anlas, remains, active=None) -> tuple[bool, str]:
+def _evaluate(anlas, remains, active=None, index=None) -> tuple[bool, str]:
     """按当前模式判定该 Token 是否可用。返回 (usable, reason)。
 
-    订阅失效 (active=False, 如拼车到期/未续费) 时账号根本无法生成 —— 无论模式如何
-    都直接判为不可用, 否则它的通道会一直白跑失败。
+    优先级: 手动停用 > 订阅失效 > 额度/点数模式。
+    手动停用与订阅失效都会直接判为不可用 —— 否则它的通道会一直空等或白跑失败。
     """
+    if index is not None and is_manual_disabled(index):
+        return False, "手动停用"
     if active is False:
         return False, "订阅已失效 (拼车到期/未续费)"
     m = mode()
@@ -91,7 +115,7 @@ def _evaluate(anlas, remains, active=None) -> tuple[bool, str]:
 
 def update(index: int, anlas, remains, source: str = "sample", active=None) -> dict:
     """记录一次判定结果。"""
-    usable, reason = _evaluate(anlas, remains, active)
+    usable, reason = _evaluate(anlas, remains, active, index)
     rec = {
         "index": int(index),
         "usable": usable,
@@ -99,6 +123,7 @@ def update(index: int, anlas, remains, source: str = "sample", active=None) -> d
         "anlas": anlas,
         "remains": remains,
         "active": active,
+        "manual_disabled": is_manual_disabled(index),
         "checked_at": time.time(),
         "source": source,
     }
@@ -180,8 +205,8 @@ def is_usable(index: int) -> bool:
     with _lock:
         rec = _records.get(int(index))
     if not rec:
-        return True  # 尚无数据时不拦, 避免误停
-    usable, _ = _evaluate(rec.get("anlas"), rec.get("remains"), rec.get("active"))
+        return not is_manual_disabled(index)  # 尚无数据时不拦, 但手动停用仍生效
+    usable, _ = _evaluate(rec.get("anlas"), rec.get("remains"), rec.get("active"), index)
     return usable
 
 
@@ -189,8 +214,8 @@ def reason(index: int) -> str:
     with _lock:
         rec = _records.get(int(index))
     if not rec:
-        return ""
-    usable, why = _evaluate(rec.get("anlas"), rec.get("remains"), rec.get("active"))
+        return "手动停用" if is_manual_disabled(index) else ""
+    usable, why = _evaluate(rec.get("anlas"), rec.get("remains"), rec.get("active"), index)
     return "" if usable else why
 
 
