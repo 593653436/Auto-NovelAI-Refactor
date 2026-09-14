@@ -39,9 +39,11 @@ DEFAULTS: dict[str, Any] = {
     "anlas_sample_interval": 1800,  # 额度采样间隔 (秒, 默认半小时)
     # 额度/点数耗尽的 Token 是否暂停参与生图: off | usage | anlas | both
     "skip_exhausted_mode": "off",
+    # 手动停用的 Token 序号 (用户在队列弹窗按的"停用", 重启后仍生效)
+    "manual_disabled_tokens": [],
 }
 
-_LIST_KEYS = {"tokens"}
+_LIST_KEYS = {"tokens", "manual_disabled_tokens"}
 
 _BOOL_KEYS = {
     "share",

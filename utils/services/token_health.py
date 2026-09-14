@@ -32,7 +32,25 @@ _lock = threading.RLock()
 _records: dict[int, dict] = {}
 _index_by_token: dict[str, int] = {}
 # 手动停用的 Token 序号: 采样照常进行, 只是不参与生图 (面板/队列弹窗可切换)
-_manual: set[int] = set()
+# 持久化在 settings.json 的 manual_disabled_tokens —— 重启后仍然生效
+def _load_persisted_manual() -> set[int]:
+    try:
+        raw = getattr(env, "manual_disabled_tokens", None) or []
+        return {int(x) for x in raw}
+    except Exception:  # noqa: BLE001
+        return set()
+
+
+_manual: set[int] = _load_persisted_manual()
+
+
+def _save_persisted_manual() -> None:
+    try:
+        with _lock:
+            items = sorted(_manual)
+        env.update({"manual_disabled_tokens": items})
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"保存手动停用列表失败: {e}")
 
 
 def is_manual_disabled(index: int) -> bool:
@@ -49,6 +67,7 @@ def set_manual_disabled(index: int, disabled: bool) -> dict:
         else:
             _manual.discard(idx)
         rec = dict(_records.get(idx) or {})
+    _save_persisted_manual()
     # 立即按新状态重判一次, 队列与面板无需等下一轮采样
     update(idx, rec.get("anlas"), rec.get("remains"), "manual", rec.get("active"))
     logger.warning(f"Token#{idx} 已{'手动停用' if disabled else '手动启用'}生图 (采样继续)")
@@ -156,16 +175,18 @@ def update(index: int, anlas, remains, source: str = "sample", active=None) -> d
         old = _records.get(int(index))
         _records[int(index)] = rec
     # 只在真正发生状态变化时打日志 (首次记录不算"恢复", 否则开机就会误报一轮)
+    usable = rec["usable"]
+    reason = rec["reason"]
     if old is None:
         if not usable:
-            logger.warning(f"Token#{index} 暂停生图: {reason} (恢复后自动启用)")
+            logger.warning(f"Token#{index} 已停用生图: {reason}")
         else:
             logger.debug(f"Token#{index} 状态已记录 (可用)")
-    elif old.get("usable") != usable:
+    elif bool(old.get("usable")) != usable:
         if usable:
-            logger.info(f"Token#{index} 额度已恢复, 重新参与生图")
+            logger.info(f"Token#{index} 已恢复参与生图")
         else:
-            logger.warning(f"Token#{index} 暂停生图: {reason} (恢复后自动启用)")
+            logger.warning(f"Token#{index} 已停用生图: {reason}")
     return rec
 
 
