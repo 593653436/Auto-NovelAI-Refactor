@@ -69,3 +69,4 @@ Desktop.ini
 *.bak
 *.orig
 Git/
+logs/

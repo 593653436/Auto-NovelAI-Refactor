@@ -66,6 +66,34 @@ def _terminal_sink(message):
 # enqueue=False: enqueue=True 会序列化记录, 异常 traceback 无法跨线程传递 (会丢失)
 logger.add(_terminal_sink, level="DEBUG", format="{message}", enqueue=False)
 
+# 文件日志: 进程重启后仍能回查"报的什么错" (终端日志随进程消失, 队列历史也在内存里)
+try:
+    from utils.config import BASE_DIR as _BASE_DIR
+
+    _MARKUP_RX_FILE = re.compile(r"\[/?[a-z]+(?: [a-z]+)*\]")
+
+    def _file_filter(record):
+        """文件里不需要终端着色标记 (如启动 banner 的 [yellow])。"""
+        record["message"] = _MARKUP_RX_FILE.sub("", record["message"] or "")
+        return True
+
+    _LOG_DIR = _BASE_DIR / "logs"
+    _LOG_DIR.mkdir(parents=True, exist_ok=True)
+    logger.add(
+        _LOG_DIR / "anr_{time:YYYY-MM-DD}.log",
+        level="DEBUG",
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level:<7} | {message}",
+        encoding="utf-8",
+        rotation="00:00",       # 每天一个文件
+        retention="14 days",    # 保留两周
+        enqueue=False,          # 同终端 sink: 保证异常 traceback 不丢
+        backtrace=False,
+        diagnose=False,
+        filter=_file_filter,
+    )
+except Exception:
+    pass
+
 
 def _format_exception(record) -> str | None:
     """把 loguru record 中的异常信息格式化为标准 traceback 文本 (与终端一致)。"""
