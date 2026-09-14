@@ -521,12 +521,25 @@ export function createAnlasPanel() {
       const rate = s.measured_per_hour;
       const pred = s.predicted_per_hour;
       const h = health.find((x) => x.index === s.index);
-      // 状态: 已暂停(额度/点数耗尽) / 可用 / 尚未采样
-      const statusNode = !s.samples
-        ? el("span", { style: "color:var(--text-2);", text: "尚无采样" })
-        : (h && h.usable === false
-          ? el("span", { style: "color:#e5484d;font-weight:600;", text: `⏸ 已暂停生图 (${h.reason || "额度用尽"})` })
-          : el("span", { style: "color:#22c55e;", text: "✅ 可用" }));
+      // 状态: 手动停用(红) / 检测到异常(橙, 仅提示, 不阻止生图) / 可用 / 尚无采样
+      let statusNode;
+      if (!s.samples) {
+        statusNode = el("span", { style: "color:var(--text-2);", text: "尚无采样" });
+      } else if (h && h.manual_disabled) {
+        statusNode = el("span", {
+          style: "color:#e5484d;font-weight:600;",
+          title: "你手动停用了该 Token: 不参与生图, 但额度采样与统计继续",
+          text: "⏸ 手动停用中",
+        });
+      } else if (h && h.warn) {
+        statusNode = el("span", {
+          style: "color:#f59e0b;font-weight:600;",
+          title: "仅提示, 不会自动停用。该 Token 仍会尝试生图, 失败原因见生图队列的失败记录",
+          text: `⚠️ ${h.warn}`,
+        });
+      } else {
+        statusNode = el("span", { style: "color:#22c55e;", text: "✅ 可用" });
+      }
       // 订阅状态: 失效直接标红 (拼车到期/未续费 → 该账号无法生成); 剩余 < 7 天也标红
       let expiryNode = null;
       if (s.active === false) {
@@ -572,19 +585,17 @@ export function createAnlasPanel() {
       ].filter(Boolean));
       summary.append(row);
     });
-    if (skipMode !== "off") {
-      const paused = stats.filter((s) => {
-        const h = health.find((x) => x.index === s.index);
-        return h && h.usable === false;
-      }).length;
-      summary.append(el("div", {
-        class: "muted",
-        style: "font-size:11px;margin-top:2px;",
-        text: paused
-          ? `当前 ${paused} 个 Token 已暂停生图: 队列会跳过它们, 额度恢复后自动重新参与 (刷新可立即复查)。`
-          : "当前没有 Token 被暂停; 额度用尽时会自动暂停并跳过, 恢复后自动启用。",
-      }));
-    }
+    const manualOff = stats.filter((s) => {
+      const h = health.find((x) => x.index === s.index);
+      return h && h.manual_disabled;
+    }).length;
+    summary.append(el("div", {
+      class: "muted",
+      style: "font-size:11px;margin-top:2px;",
+      text: manualOff
+        ? `当前 ${manualOff} 个 Token 被你手动停用 (不参与生图, 采样与统计继续)。`
+        : "没有 Token 被手动停用。检测到的异常(订阅失效/电量用尽)只做提示, 不会自动停用; 需要停用请到「生图队列」弹窗按按钮。",
+    }));
     summary.append(el("div", {
       class: "muted",
       style: "font-size:11px;margin-top:2px;",

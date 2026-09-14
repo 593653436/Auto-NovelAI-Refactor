@@ -21,10 +21,10 @@ from utils.logger import logger
 
 MODES = ("off", "usage", "anlas", "both")
 MODE_LABELS = {
-    "off": "不停用 (额度用完也照常排队, 失败后丢弃)",
-    "usage": "停用【无额度】的 (用量电池为 0)",
-    "anlas": "停用【无点数】的 (Anlas 为 0)",
-    "both": "停用【无额度】或【无点数】的",
+    "off": "不停用 (默认: 检测到的异常只提示, 不阻止生图)",
+    "usage": "自动停用【无额度】的 (用量电池为 0)",
+    "anlas": "自动停用【无点数】的 (Anlas 为 0)",
+    "both": "自动停用【无额度】或【无点数】的",
 }
 
 _lock = threading.RLock()
@@ -70,25 +70,30 @@ def set_mode(m: str) -> str:
         recs = [dict(r) for r in _records.values()]
     for r in recs:
         try:
-            update(int(r.get("index", 0)), r.get("anlas"), r.get("remains"), "mode-change")
+            update(
+                int(r.get("index", 0)),
+                r.get("anlas"),
+                r.get("remains"),
+                "mode-change",
+                r.get("active"),  # 必须带上, 否则订阅状态会被覆盖成 None
+            )
         except Exception:  # noqa: BLE001
             pass
     return m
 
 
-def _evaluate(anlas, remains, active=None, index=None) -> tuple[bool, str]:
-    """按当前模式判定该 Token 是否可用。返回 (usable, reason)。
+def _block_reason(anlas, remains, active, index) -> str:
+    """真正**阻止生图**的原因。默认只认"手动停用"(用户亲手按的)。
 
-    优先级: 手动停用 > 订阅失效 > 额度/点数模式。
-    手动停用与订阅失效都会直接判为不可用 —— 否则它的通道会一直空等或白跑失败。
+    自动检测出的问题 (订阅失效 / 电量耗尽 / 点数耗尽) 一律**只提示不阻止** ——
+    用户需要看到真实的报错, 而不是被悄悄跳过。
+    唯一的例外: 用户在面板显式选择了 skip_exhausted_mode (opt-in, 默认 off)。
     """
     if index is not None and is_manual_disabled(index):
-        return False, "手动停用"
-    if active is False:
-        return False, "订阅已失效 (拼车到期/未续费)"
+        return "手动停用"
     m = mode()
     if m == "off":
-        return True, ""
+        return ""
     try:
         a = int(anlas)
     except (TypeError, ValueError):
@@ -100,26 +105,46 @@ def _evaluate(anlas, remains, active=None, index=None) -> tuple[bool, str]:
     no_anlas = a == 0
     no_usage = r == 0
     if m == "usage" and no_usage:
-        return False, "无额度 (用量电池为 0)"
+        return "无额度 (用量电池为 0)"
     if m == "anlas" and no_anlas:
-        return False, "无点数 (Anlas 为 0)"
+        return "无点数 (Anlas 为 0)"
     if m == "both":
         if no_usage and no_anlas:
-            return False, "无额度且无点数"
+            return "无额度且无点数"
         if no_usage:
-            return False, "无额度 (用量电池为 0)"
+            return "无额度 (用量电池为 0)"
         if no_anlas:
-            return False, "无点数 (Anlas 为 0)"
-    return True, ""
+            return "无点数 (Anlas 为 0)"
+    return ""
+
+
+def _warning(anlas, remains, active) -> str:
+    """仅用于**提示**(不阻止生图): 订阅失效 / 电量用尽 / 点数用尽。"""
+    if active is False:
+        return "订阅已失效 (无法生图)"
+    try:
+        a = int(anlas)
+    except (TypeError, ValueError):
+        a = -1
+    try:
+        r = int(remains)
+    except (TypeError, ValueError):
+        r = -1
+    if r == 0:
+        return "电量用尽 (用量电池为 0)"
+    if a == 0:
+        return "点数用尽 (Anlas 为 0)"
+    return ""
 
 
 def update(index: int, anlas, remains, source: str = "sample", active=None) -> dict:
     """记录一次判定结果。"""
-    usable, reason = _evaluate(anlas, remains, active, index)
+    block = _block_reason(anlas, remains, active, index)
     rec = {
         "index": int(index),
-        "usable": usable,
-        "reason": reason,
+        "usable": not block,          # 只有"手动停用"或用户显式开启的跳过模式才会 False
+        "reason": block,
+        "warn": "" if block else _warning(anlas, remains, active),  # 仅提示, 不阻止生图
         "anlas": anlas,
         "remains": remains,
         "active": active,
@@ -206,8 +231,7 @@ def is_usable(index: int) -> bool:
         rec = _records.get(int(index))
     if not rec:
         return not is_manual_disabled(index)  # 尚无数据时不拦, 但手动停用仍生效
-    usable, _ = _evaluate(rec.get("anlas"), rec.get("remains"), rec.get("active"), index)
-    return usable
+    return not _block_reason(rec.get("anlas"), rec.get("remains"), rec.get("active"), index)
 
 
 def reason(index: int) -> str:
@@ -215,8 +239,7 @@ def reason(index: int) -> str:
         rec = _records.get(int(index))
     if not rec:
         return "手动停用" if is_manual_disabled(index) else ""
-    usable, why = _evaluate(rec.get("anlas"), rec.get("remains"), rec.get("active"), index)
-    return "" if usable else why
+    return _block_reason(rec.get("anlas"), rec.get("remains"), rec.get("active"), index)
 
 
 def snapshot() -> list[dict]:
