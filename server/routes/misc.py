@@ -1207,18 +1207,26 @@ def post_token_health_mode(payload: dict = None):
 def post_token_disable(payload: dict = None):
     """手动停用/启用某个 Token 的生图 (采样照常进行, 只是不参与生图)。
 
-    body: {"index": 0, "disabled": true}
+    body: {"token": "pst-xxxx…yyyy", "disabled": true}
+      · 也兼容旧的 {"index": 0} 写法 (会解析成当前该下标的 token)
     """
     from utils.services import token_health
+    from utils.tokens import get_tokens, mask_token
 
     data = payload or {}
-    try:
-        index = int(data.get("index"))
-    except (TypeError, ValueError):
-        return {"ok": False, "message": "index 必须是整数"}
+    token = str(data.get("token") or "").strip()
+    if not token:
+        try:
+            idx = int(data.get("index"))
+            tokens = get_tokens()
+            token = mask_token(tokens[idx]) if 0 <= idx < len(tokens) else ""
+        except (TypeError, ValueError):
+            token = ""
+    if not token:
+        return {"ok": False, "message": "需要提供 token (或有效的 index)"}
     disabled = bool(data.get("disabled", True))
-    res = token_health.set_manual_disabled(index, disabled)
-    return {"ok": True, **res, "reason": token_health.reason(index)}
+    res = token_health.set_manual_disabled(token, disabled)
+    return {"ok": True, **res, "reason": token_health.reason(token)}
 
 
 @router.post("/anlas/sample")

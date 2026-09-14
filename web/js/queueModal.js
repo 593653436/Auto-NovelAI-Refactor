@@ -64,7 +64,7 @@ function laneNode(w) {
       title: off
         ? "恢复该 Token 参与生图"
         : "停用该 Token: 不再用它生成图片 (额度采样与统计照常进行)",
-      onclick: () => toggleDisable(w.index, !off),
+      onclick: () => toggleDisable(w.token, !off),
     }),
   ]);
 }
@@ -178,10 +178,11 @@ const cancelTask = (id) => apply(() => post("/api/queue/cancel", { id }), "已�
 const stopTask = (id) => apply(() => post("/api/queue/stop", { id }), "已发送停止信号");
 const clearQueue = () => apply(() => post("/api/queue/clear", {}), "已清空排队任务");
 const refresh = () => apply(() => get("/api/queue"));
-/** 手动停用/启用某个 Token 的生图 (采样照常, 只是不参与生图) */
-const toggleDisable = (index, disabled) =>
+/** 手动停用/启用某个 Token 的生图 (采样照常, 只是不参与生图)
+ *  以 token 本身为标识 —— 删除/重排 API 后停用状态仍跟着对应 API 走 */
+const toggleDisable = (token, disabled) =>
   apply(
-    () => post("/api/tokens/disable", { index, disabled }).then(() => get("/api/queue")),
+    () => post("/api/tokens/disable", { token, disabled }).then(() => get("/api/queue")),
     disabled ? "已停用该 Token 的生图 (采样与统计继续)" : "已恢复该 Token 参与生图"
   );
 

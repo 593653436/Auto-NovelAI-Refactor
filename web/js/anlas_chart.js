@@ -520,7 +520,8 @@ export function createAnlasPanel() {
       const color = LINE_COLORS[i % LINE_COLORS.length];
       const rate = s.measured_per_hour;
       const pred = s.predicted_per_hour;
-      const h = health.find((x) => x.index === s.index);
+      // 以 token 标识匹配健康状态 (不用下标: 删除/重排 API 后下标会位移)
+      const h = health.find((x) => x.token && x.token === s.token);
       // 状态: 手动停用(红) / 检测到异常(橙, 仅提示, 不阻止生图) / 可用 / 尚无采样
       let statusNode;
       if (!s.samples) {
@@ -586,7 +587,8 @@ export function createAnlasPanel() {
       summary.append(row);
     });
     const manualOff = stats.filter((s) => {
-      const h = health.find((x) => x.index === s.index);
+      // 以 token 标识匹配健康状态 (不用下标: 删除/重排 API 后下标会位移)
+      const h = health.find((x) => x.token && x.token === s.token);
       return h && h.manual_disabled;
     }).length;
     summary.append(el("div", {

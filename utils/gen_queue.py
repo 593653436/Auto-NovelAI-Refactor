@@ -117,7 +117,7 @@ class _Worker(threading.Thread):
             try:
                 from utils.services import token_health
 
-                token_health.mark_failed(self.idx, task.error or "")
+                token_health.mark_failed(self.queue._token_key(self.idx), task.error or "")
             except Exception:  # noqa: BLE001
                 pass
         finally:
@@ -214,12 +214,27 @@ class GenerationQueue:
         self.ensure_workers()
         self._publish()
 
+    @staticmethod
+    def _token_key(idx: int) -> str | None:
+        """通道下标 → token 标识 (打码字符串)。
+
+        状态一律以 token 标识为准, 不用下标 —— 删除/重排 API 后下标会位移,
+        用下标会把"停用标记"留在槽位上。
+        """
+        try:
+            from utils.tokens import get_tokens, mask_token
+
+            tokens = get_tokens()
+            return mask_token(tokens[idx]) if 0 <= idx < len(tokens) else None
+        except Exception:  # noqa: BLE001
+            return None
+
     def _token_usable(self, idx: int) -> bool:
-        """该通道绑定的 Token 当前是否可用于生图 (额度/点数耗尽时可被暂停)。"""
+        """该通道绑定的 Token 当前是否可用于生图 (手动停用/显式跳过模式下为 False)。"""
         try:
             from utils.services import token_health
 
-            return token_health.is_usable(idx)
+            return token_health.is_usable(self._token_key(idx))
         except Exception:  # noqa: BLE001
             return True
 
@@ -227,7 +242,7 @@ class GenerationQueue:
         try:
             from utils.services import token_health
 
-            return token_health.reason(idx)
+            return token_health.reason(self._token_key(idx))
         except Exception:  # noqa: BLE001
             return ""
 
@@ -235,7 +250,7 @@ class GenerationQueue:
         try:
             from utils.services import token_health
 
-            return token_health.is_manual_disabled(idx)
+            return token_health.is_manual_disabled(self._token_key(idx))
         except Exception:  # noqa: BLE001
             return False
 

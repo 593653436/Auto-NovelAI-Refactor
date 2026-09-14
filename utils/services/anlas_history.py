@@ -170,12 +170,14 @@ def estimate_cost_per_image(stats: list[dict], events: list[dict]) -> None:
 
     注意: 同一账号若被他人共用 (拼车), 别人的消耗也会计入 → 估计值偏高, 是**上限**。
     """
-    by_token: dict[int, int] = {}
+    by_token: dict[str, int] = {}
     for e in events or []:
-        by_token[int(e.get("index", -1))] = by_token.get(int(e.get("index", -1)), 0) + 1
+        key = str(e.get("token") or "").strip()
+        if key:
+            by_token[key] = by_token.get(key, 0) + 1
 
     for s in stats:
-        n = by_token.get(int(s.get("index", -2)), 0)
+        n = by_token.get(str(s.get("token") or ""), 0)
         s["generated"] = n
         s["battery_delta"] = None
         s["cost_per_image"] = None
@@ -199,25 +201,26 @@ def compute_stats(data: list[dict]) -> list[dict]:
     """
     from utils.tokens import get_tokens, mask_token
 
-    by_token: dict[int, list[dict]] = {}
+    # 按 **token 标识** 归组 (不用下标: 删除/重排 API 后下标会位移, 历史会串台)
+    by_token: dict[str, list[dict]] = {}
     for s in data:
         for t in s.get("tokens") or []:
-            idx = int(t.get("index") or 0)
-            by_token.setdefault(idx, []).append({"t": float(s.get("t") or 0), "v": t})
+            key = str(t.get("token") or "").strip()
+            if not key:
+                key = f"#{t.get('index')}"  # 兼容极旧的无 token 字段数据
+            by_token.setdefault(key, []).append({"t": float(s.get("t") or 0), "v": t})
 
-    configured = get_tokens()
-    for i in range(len(configured)):
-        by_token.setdefault(i, [])
+    # 只列出**当前配置里**的 Token —— 设置里删掉的 API 不再显示
+    configured = [mask_token(t) for t in get_tokens()]
 
     stats: list[dict] = []
-    for idx in sorted(by_token):
-        rows = sorted(by_token[idx], key=lambda r: r["t"])
-        masked = mask_token(configured[idx]) if idx < len(configured) else None
+    for idx, key in enumerate(configured):
+        rows = sorted(by_token.get(key, []), key=lambda r: r["t"])
         if not rows:
             # 还没有采样点 (例如刚添加的 Token)
             stats.append({
                 "index": idx,
-                "token": masked,
+                "token": key,
                 "samples": 0,
                 "span_hours": 0.0,
                 "remains": None,
@@ -250,7 +253,7 @@ def compute_stats(data: list[dict]) -> list[dict]:
 
         stats.append({
             "index": idx,
-            "token": latest.get("token") or masked,
+            "token": key,
             "samples": len(rows),
             "span_hours": round(span_h, 2),
             "remains": latest.get("remains"),
