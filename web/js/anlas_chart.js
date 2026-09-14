@@ -451,13 +451,13 @@ export function createAnlasPanel() {
 
   const refreshBtn = el("button", { class: "btn btn-sm", text: "🔄 刷新" });
   refreshBtn.addEventListener("click", async () => {
-    // 刷新前先实时检查一次额度 (纯查询, 不消耗): 恢复了的 Token 立刻重新参与生图
+    // 立即采样一次 (纯查询不消耗): 同时刷新额度、可用性、订阅到期日
     refreshBtn.disabled = true;
     const old = refreshBtn.textContent;
-    refreshBtn.textContent = "检查中…";
+    refreshBtn.textContent = "查询中…";
     try {
-      await get("/api/tokens/health?check=1");
-    } catch { /* 检查失败也照常刷新本地数据 */ }
+      await post("/api/anlas/sample", {});
+    } catch { /* 失败也照常刷新本地数据 */ }
     await refresh();
     refreshBtn.disabled = false;
     refreshBtn.textContent = old;
@@ -527,10 +527,33 @@ export function createAnlasPanel() {
         : (h && h.usable === false
           ? el("span", { style: "color:#e5484d;font-weight:600;", text: `⏸ 已暂停生图 (${h.reason || "额度用尽"})` })
           : el("span", { style: "color:#22c55e;", text: "✅ 可用" }));
+      // 订阅状态: 失效直接标红 (拼车到期/未续费 → 该账号无法生成); 剩余 < 7 天也标红
+      let expiryNode = null;
+      if (s.active === false) {
+        expiryNode = el("span", {
+          style: "color:#e5484d;font-weight:600;",
+          title: "订阅已失效 (如拼车到期/未续费): 该账号无法生成, 建议从设置里移除",
+          text: "⛔ 订阅已失效 (无法生图)",
+        });
+      } else if (s.expires_at) {
+        const exp = new Date(Number(s.expires_at) * 1000);
+        const days = (exp.getTime() - Date.now()) / 86400000;
+        const md = `${String(exp.getMonth() + 1).padStart(2, "0")}-${String(exp.getDate()).padStart(2, "0")}`;
+        const urgent = days < 7;
+        const expired = days <= 0;
+        expiryNode = el("span", {
+          style: urgent ? "color:#e5484d;font-weight:600;" : "color:var(--text-2);",
+          title: `订阅到期: ${exp.toLocaleString()}`,
+          text: expired
+            ? `⛔ 订阅已到期 (${md})`
+            : `到期 ${md}${urgent ? ` (⚠️ 剩 ${days.toFixed(1)} 天)` : ` (剩 ${Math.floor(days)} 天)`}`,
+        });
+      }
       const row = el("div", { style: "display:flex;flex-wrap:wrap;gap:6px;align-items:baseline;" }, [
         el("span", { style: `color:${color};font-weight:600;`, text: `${marks[i] || i + 1}${s.token || ""}` }),
         el("span", { text: `当前 ${s.remains ?? "?"}% · 点数 ${s.anlas ?? "?"}` }),
         statusNode,
+        expiryNode,
         el("span", { style: "color:var(--text-2);", text: `实测 ${fmtRate(rate)}` }),
         el("span", { style: "color:var(--text-2);", text: `接口推算 ${fmtRate(pred)}` }),
         s.anlas_delta !== null && s.anlas_delta !== undefined && Number(s.anlas_delta) !== 0

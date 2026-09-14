@@ -54,8 +54,14 @@ def set_mode(m: str) -> str:
     return m
 
 
-def _evaluate(anlas, remains) -> tuple[bool, str]:
-    """按当前模式判定该 Token 是否可用。返回 (usable, reason)。"""
+def _evaluate(anlas, remains, active=None) -> tuple[bool, str]:
+    """按当前模式判定该 Token 是否可用。返回 (usable, reason)。
+
+    订阅失效 (active=False, 如拼车到期/未续费) 时账号根本无法生成 —— 无论模式如何
+    都直接判为不可用, 否则它的通道会一直白跑失败。
+    """
+    if active is False:
+        return False, "订阅已失效 (拼车到期/未续费)"
     m = mode()
     if m == "off":
         return True, ""
@@ -83,15 +89,16 @@ def _evaluate(anlas, remains) -> tuple[bool, str]:
     return True, ""
 
 
-def update(index: int, anlas, remains, source: str = "sample") -> dict:
+def update(index: int, anlas, remains, source: str = "sample", active=None) -> dict:
     """记录一次判定结果。"""
-    usable, reason = _evaluate(anlas, remains)
+    usable, reason = _evaluate(anlas, remains, active)
     rec = {
         "index": int(index),
         "usable": usable,
         "reason": reason,
         "anlas": anlas,
         "remains": remains,
+        "active": active,
         "checked_at": time.time(),
         "source": source,
     }
@@ -116,7 +123,7 @@ def update_many(tokens: list[dict], source: str = "sample") -> None:
     """按 inquire_anlas_all() 的返回批量刷新。"""
     for t in tokens or []:
         try:
-            update(int(t.get("index", 0)), t.get("anlas"), t.get("remains"), source)
+            update(int(t.get("index", 0)), t.get("anlas"), t.get("remains"), source, t.get("active"))
         except Exception as e:  # noqa: BLE001
             logger.debug(f"刷新 Token 健康状态失败: {e}")
 
@@ -126,7 +133,7 @@ def mark_failed(index: int, error: str = "") -> None:
     with _lock:
         rec = _records.get(int(index))
     if rec:
-        update(index, rec.get("anlas"), rec.get("remains"), "after-fail")
+        update(index, rec.get("anlas"), rec.get("remains"), "after-fail", rec.get("active"))
     recheck_async(int(index), error)
 
 
@@ -140,7 +147,7 @@ def recheck_async(index: int, error: str = "") -> None:
             tokens = inquire_anlas_all()
             target = [t for t in tokens if int(t.get("index", -1)) == int(index)]
             if target:
-                update(index, target[0].get("anlas"), target[0].get("remains"), "after-fail")
+                update(index, target[0].get("anlas"), target[0].get("remains"), "after-fail", target[0].get("active"))
             else:
                 logger.debug(f"复查 Token#{index} 无结果 (可能已被移除)")
         except Exception as e:  # noqa: BLE001
@@ -165,31 +172,25 @@ def check_all(source: str = "manual") -> list[dict]:
 
 
 def is_usable(index: int) -> bool:
-    """该 Token 当前是否可用于生图 (模式为 off 时恒可用)。
+    """该 Token 当前是否可用于生图 (模式为 off 时恒可用; 订阅失效恒不可用)。
 
     注意: 必须用**当前模式**重新判定记录里的原始数值 —— 模式切换后旧结论立即失效,
     否则会出现"改了模式但不生效, 要等下一次采样"的问题。
     """
-    m = mode()
-    if m == "off":
-        return True
     with _lock:
         rec = _records.get(int(index))
     if not rec:
         return True  # 尚无数据时不拦, 避免误停
-    usable, _ = _evaluate(rec.get("anlas"), rec.get("remains"))
+    usable, _ = _evaluate(rec.get("anlas"), rec.get("remains"), rec.get("active"))
     return usable
 
 
 def reason(index: int) -> str:
-    m = mode()
-    if m == "off":
-        return ""
     with _lock:
         rec = _records.get(int(index))
     if not rec:
         return ""
-    usable, why = _evaluate(rec.get("anlas"), rec.get("remains"))
+    usable, why = _evaluate(rec.get("anlas"), rec.get("remains"), rec.get("active"))
     return "" if usable else why
 
 

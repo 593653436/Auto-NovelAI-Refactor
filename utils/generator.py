@@ -107,7 +107,7 @@ def inquire_anlas_all() -> list[dict]:
         finally:
             pop_thread_token()
         item = {"index": i, "token": mask_token(tok), "anlas": -1, "remains": -1,
-                "next_percent_in": None, "negative": None}
+                "next_percent_in": None, "negative": None, "expires_at": None, "active": None}
         if body:
             try:
                 anlas, remains = _parse_anlas(body)
@@ -117,6 +117,11 @@ def inquire_anlas_all() -> list[dict]:
                     "remains": remains,
                     "next_percent_in": usage.get("timeUntilNextPercent"),
                     "negative": usage.get("isNegative"),
+                    # 订阅到期时间 (拼车号常不告知, 用于面板提前预警)
+                    "expires_at": body.get("expiresAt"),
+                    # 订阅是否有效: 失效(如拼车到期/未续费)时账号无法生成
+                    "active": body.get("active"),
+                    "tier": body.get("tier"),
                 })
             except Exception as e:
                 logger.debug(f"解析 Token#{i} 剩余点数失败: {e}")
