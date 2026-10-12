@@ -50,8 +50,12 @@ async def plugin_rows():
 
 
 @router.post("/plugins/check-updates")
-async def check_updates():
-    """手动联网检查全部已安装插件的更新 (插件列表不再自动检查, 仅点击按钮时联网)。"""
+def check_updates():
+    """手动联网检查全部已安装插件的更新 (插件列表不再自动检查, 仅点击按钮时联网)。
+
+    同步 def: 逐插件 git ls-remote 是阻塞子进程 (每个最长 25 秒),
+    FastAPI 会在线程池执行, 不再冻结事件循环。
+    """
     return plugins_store.check_updates()
 
 
@@ -110,6 +114,7 @@ async def apply_plugins():
         load_plugins()
     except Exception as e:
         logger.error(f"插件加载失败: {e}")
+        logger.opt(exception=True).debug("插件加载失败堆栈:")
     # 延迟重启, 让响应先返回 (与 run.bat 一致: -X utf8)
     import os
     import sys

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform
 import re
+import shutil
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -14,10 +17,12 @@ from pathlib import Path
 import psutil
 import send2trash
 from fastapi import APIRouter, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 
 from src.generate_images import generate  # noqa: F401  (确保模型导入)
-from utils.config import BASE_DIR
+from utils import http as http_util
+from utils.config import BASE_DIR, resolve_media_path
 from utils.gen_queue import gen_queue
 from utils.helpers import get_update_status, read_json, shutdown_app
 from utils.jobs import jobs
@@ -43,10 +48,20 @@ router = APIRouter(prefix="/api", tags=["misc"])
 
 
 def _resolve_allowed(path: str) -> Path | None:
-    """把前端传入的路径解析为绝对路径 (不再限制目录, 默认支持全部磁盘访问)。"""
+    """把前端传入的路径解析为绝对路径 (不再限制目录, 默认支持全部磁盘访问)。
+
+    相对路径优先按 outputs 根解析: /api/browse/images 返回的正是 outputs 相对路径
+    (全屏看图经 /api/image 直接收到该路径); outputs 下不存在时再按当前工作目录
+    解析, 兼容旧的 CWD 相对路径调用方。
+    """
     if not path:
         return None
-    p = Path(path).resolve()
+    p = Path(path)
+    if not p.is_absolute():
+        cand = (BASE_DIR / "outputs" / path).resolve()
+        if cand.exists():
+            return cand
+    p = p.resolve()
     return p if p.exists() else None
 
 
@@ -60,14 +75,35 @@ async def shutdown_server():
 # ---------------------------------------------------------------- 状态
 
 
+# last.json 里的 image / mask 是 base64 图片 (实测单次可达 1.5MB), 前端"加载上次"只用
+# parameters 里的标量字段 (见 web/js/views/generate.js 读 app.last.parameters), 从不需要
+# 这两个大字段。全量读取走 /api/last。此前 /api/state 把整份 last.json 带出去, 每次
+# 页面加载都要多传 1.5MB 并同步序列化一次 (与 utils/wake.py 注释里记录的同一个坑)。
+_STATE_LAST_DROP_KEYS = ("image", "mask")
+
+
+def _last_params_for_state() -> dict:
+    """读取 last.json 并剔除超大的 base64 图片字段 (供 /api/state 使用)。"""
+    if not (BASE_DIR / "last.json").exists():
+        return {}
+    try:
+        last_data = read_json(BASE_DIR / "last.json")
+    except Exception as e:
+        logger.warning(f"读取 last.json 失败: {e}")
+        logger.opt(exception=True).debug("读取 last.json 失败堆栈:")
+        return {}
+    if not isinstance(last_data, dict):
+        return {}
+    params = last_data.get("parameters")
+    if isinstance(params, dict):
+        for key in _STATE_LAST_DROP_KEYS:
+            params.pop(key, None)
+    return last_data
+
+
 @router.get("/state")
 async def get_state():
-    last_data = {}
-    if (BASE_DIR / "last.json").exists():
-        try:
-            last_data = read_json(BASE_DIR / "last.json")
-        except Exception as e:
-            logger.warning(f"读取 last.json 失败: {e}")
+    last_data = _last_params_for_state()
     parameters = last_data.get("parameters", {})
     model = last_data.get("model", "nai-diffusion-4-5-full").replace("-inpainting", "")
     if model == "nai-diffusion-4-curated":
@@ -102,6 +138,18 @@ async def get_state():
     }
 
 
+@router.get("/ready")
+def ready():
+    """轻量就绪探针: 只回版本号, 不碰 last.json 等大对象。
+
+    给开始菜单唤醒脚本 (utils/wake.py) 的 0.5s 轮询用。为什么不复用 /api/state:
+    那里会把 last.json (含 base64 图片, 实测单次响应 4MB+) 整个序列化返回 ——
+    高频探测既拖慢启动, 又容易被调用方按固定长度截断而误判成"后端未就绪"。
+    version 与 /api/state 同源 (utils.variable.VERSION), 判据不变 (200 + 含 version)。
+    """
+    return {"version": VERSION}
+
+
 # ---------------------------------------------------------------- 上次参数 (实时读取 last.json)
 
 
@@ -113,6 +161,7 @@ async def get_last():
             return read_json(BASE_DIR / "last.json")
         except Exception as e:
             logger.warning(f"读取 last.json 失败: {e}")
+            logger.opt(exception=True).debug("读取 last.json 失败堆栈:")
     return {}
 
 
@@ -145,65 +194,115 @@ _BROWSE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"}
 _BROWSE_EXCLUDED_DIRS = {
     "backgrounds",
     "uploads",
-}  # API 壁纸缓存 / 上传目录, 不在图片浏览中展示
+    "selector_trash",
+}  # API 壁纸缓存 / 上传目录 / 筛选可撤销回收站, 不在图片浏览中展示
 
 
 @router.get("/browse/folders")
-async def browse_folders():
-    """列出 outputs 目录及其全部子目录 (相对路径), 供图片浏览视图选择。"""
+def browse_folders():
+    """列出 outputs 目录及其全部子目录 (相对路径), 供图片浏览视图选择。
+
+    同步 def: FastAPI 会在线程池执行, 目录扫描不再阻塞事件循环 (大量图片时应用不再整体卡住)。
+    scandir 递归遍历, 遇到排除目录直接跳过, 比 rglob + 逐项 is_dir 快得多。
+    """
     base = BASE_DIR / "outputs"
     folders = [""]
+
+    def walk(d: Path, rel_prefix: str):
+        try:
+            entries = sorted(os.scandir(d), key=lambda e: e.name)
+        except OSError:
+            return
+        for entry in entries:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            name = entry.name
+            if name.startswith((".", "_")):  # "_"/"." 开头为内部/测试目录
+                continue
+            rel = f"{rel_prefix}/{name}" if rel_prefix else name
+            if rel.split("/")[0] in _BROWSE_EXCLUDED_DIRS:
+                continue
+            folders.append(rel)
+            walk(Path(entry.path), rel)
+
     if base.exists():
-        for p in sorted(base.rglob("*")):
-            if p.is_dir() and not p.name.startswith((".", "_")):  # "_"/"." 开头为内部/测试目录
-                rel = p.relative_to(base).as_posix()
-                top = rel.split("/")[0]
-                if top in _BROWSE_EXCLUDED_DIRS or top.startswith(("_", ".")):
-                    continue
-                folders.append(rel)
+        walk(base, "")
     return {"base": "outputs", "folders": folders}
 
 
 @router.get("/browse/images")
-async def browse_images(dir: str = "", recursive: bool = False):
-    """列出 outputs 下指定子目录的图片 (recursive=True 时含子目录, 前端自行排序)。"""
+def browse_images(dir: str = "", recursive: bool = False):
+    """列出 outputs 下指定子目录的图片 (recursive=True 时含子目录, 前端自行排序)。
+
+    同步 def: FastAPI 会在线程池执行, 浏览期间每 5 秒的轮询不再周期性阻塞事件循环。
+    scandir 递归遍历 (Windows 上 DirEntry 自带 stat 信息, 无需逐文件 stat),
+    并在遍历时跳过排除目录, 大量图片时扫描速度提升一个数量级。
+    """
     base = (BASE_DIR / "outputs").resolve()
     target = (base / dir).resolve()
     images = []
     # 防目录穿越: 解析后必须仍在 outputs 内
     if str(target).startswith(str(base)) and target.is_dir():
-        candidates = target.rglob("*") if recursive else target.iterdir()
-        for p in candidates:
+        top0 = dir.strip("/").split("/")[0] if dir else None
+
+        def walk(d: Path, top: str | None):
             try:
-                if not p.is_file() or p.suffix.lower() not in _BROWSE_EXTS:
-                    continue
-                if "temp_" in p.name.lower():  # 排除临时文件
-                    continue
-                top = p.relative_to(base).as_posix().split("/")[0]
-                if top in _BROWSE_EXCLUDED_DIRS or top.startswith(("_", ".")):
-                    continue
-                st = p.stat()
-                images.append(
-                    {
-                        "name": p.name,
-                        "path": p.as_posix(),
-                        "mtime": st.st_mtime,
-                        "size": st.st_size,
-                    }
-                )
+                with os.scandir(d) as it:
+                    for entry in it:
+                        name = entry.name
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                if not recursive:
+                                    continue
+                                if name.startswith((".", "_")):
+                                    continue
+                                child_top = top if top else name
+                                if child_top in _BROWSE_EXCLUDED_DIRS:
+                                    continue
+                                walk(Path(entry.path), child_top)
+                                continue
+                            if not entry.is_file(follow_symlinks=False):
+                                continue
+                            if "temp_" in name.lower():  # 排除临时文件
+                                continue
+                            if os.path.splitext(name)[1].lower() not in _BROWSE_EXTS:
+                                continue
+                            if top is not None and (top in _BROWSE_EXCLUDED_DIRS or top.startswith(("_", "."))):
+                                continue
+                            st = entry.stat(follow_symlinks=False)
+                            ap = Path(entry.path)
+                            images.append(
+                                {
+                                    "name": name,
+                                    # path: 相对 outputs (缩略图等新接口使用); _abs: 绝对路径,
+                                    # 供全屏看图 / 删除 / 收藏 / 法术解析等按绝对路径工作的接口使用
+                                    "path": ap.relative_to(base).as_posix(),
+                                    "_abs": ap.as_posix(),
+                                    "mtime": st.st_mtime,
+                                    "size": st.st_size,
+                                }
+                            )
+                        except OSError:
+                            continue
             except OSError:
-                continue
+                return
+
+        walk(target, top0)
     return {"dir": dir, "images": images}
 
 
 @router.post("/browse/delete")
-async def browse_delete(payload: dict):
-    """把图片浏览中的图片移到系统回收站 (send2trash, 不经过 selector_trash 文件夹)。"""
+def browse_delete(payload: dict):
+    """把图片浏览中的图片移到系统回收站 (send2trash, 不经过 selector_trash 文件夹)。
+
+    同步 def: 回收站操作是阻塞 IO, 在线程池执行避免卡住事件循环。
+    """
     path = (payload.get("path") or "").strip()
     base = (BASE_DIR / "outputs").resolve()
     if not path:
         raise HTTPException(status_code=400, detail="缺少图片路径")
-    target = Path(path).resolve()
+    # 相对路径按 outputs 根解析 (图片浏览接口返回 outputs 相对路径)
+    target = Path(resolve_media_path(path)).resolve()
     # 防目录穿越: 仅允许删除 outputs 内的图片
     if not str(target).startswith(str(base)) or not target.is_file():
         raise HTTPException(status_code=404, detail="图片不存在或无权访问")
@@ -216,6 +315,129 @@ async def browse_delete(payload: dict):
     except Exception as e:
         logger.error(f"删除图片失败: {e}")
         raise HTTPException(status_code=500, detail=f"删除失败: {e}")
+
+
+# ---------------------------------------------------------------- 图片浏览缩略图
+
+_THUMB_SIZE = 360  # 网格缩略图最长边 (px), 兼容高分屏
+_THUMB_DIR = BASE_DIR / "outputs" / ".thumb_cache"  # "." 开头目录不会出现在图片浏览中
+_THUMB_CAP = 20000  # 缓存文件数上限, 超过后按最旧优先清理一半
+
+
+@router.post("/browse/reveal")
+def browse_reveal(payload: dict):
+    """在系统文件管理器中定位显示某张生成图。
+
+    Windows 用 explorer /select, 高亮选中文件本身; 其他平台无对应参数, 退回打开所在目录。
+    同步 def: 拉起 explorer 属阻塞操作, FastAPI 会在线程池执行。
+    """
+    target = _resolve_allowed(str(payload.get("path") or "").strip())
+    if target is None or not target.is_file():
+        raise HTTPException(404, "文件不存在")
+    if os.name == "nt":
+        # explorer.exe 不走标准 argv, 自己解析命令行字符串: "/select," 与路径之间有空格会解析失败
+        # (只开文件夹不选中); 必须用无空格、路径整体加引号的单参数形态。成功时也返回非零码, 不校验结果
+        subprocess.Popen(f'explorer /select,"{target}"')
+    else:
+        try:
+            os.startfile(str(target.parent))
+        except AttributeError:
+            subprocess.Popen(["xdg-open", str(target.parent)])
+    return {"ok": True}
+
+
+@router.get("/browse/thumb")
+def browse_thumb(path: str):
+    """返回图片的 360px WebP 缩略图 (磁盘缓存)。
+
+    缓存键包含原图 mtime_ns + size: 原图更新/覆盖后自动失效重新生成。
+    同步 def: Pillow 解码/缩放在线程池执行, 不阻塞事件循环。
+    生成失败返回 404, 前端收到后回退加载原图。
+    """
+    base = (BASE_DIR / "outputs").resolve()
+    p = Path(path)
+    target = (p if p.is_absolute() else base / path).resolve()
+    if not str(target).startswith(str(base)) or not target.is_file():
+        raise HTTPException(status_code=404, detail="图片不存在或无权访问")
+    if target.suffix.lower() not in _BROWSE_EXTS:
+        raise HTTPException(status_code=400, detail="不支持的图片类型")
+    try:
+        st = target.stat()
+    except OSError:
+        raise HTTPException(status_code=404, detail="图片不存在")
+    rel = target.relative_to(base).as_posix()
+    key = hashlib.sha1(f"{rel}|{st.st_mtime_ns}|{st.st_size}".encode("utf-8")).hexdigest()
+    _THUMB_DIR.mkdir(parents=True, exist_ok=True)
+    thumb = _THUMB_DIR / f"{key}.webp"
+    if not thumb.is_file():
+        _generate_thumbnail(target, thumb)
+    if not thumb.is_file():  # 生成失败 -> 前端回退原图
+        raise HTTPException(status_code=404, detail="缩略图生成失败")
+    # 缓存键已包含内容版本, 可永久缓存
+    return FileResponse(
+        thumb, media_type="image/webp", headers={"Cache-Control": "public, max-age=31536000, immutable"}
+    )
+
+
+def _generate_thumbnail(target: Path, thumb: Path) -> None:
+    """生成缩略图并原子写入缓存 (失败静默, 由调用方回退 404)。"""
+    tmp = None
+    try:
+        from PIL import Image, ImageOps
+
+        with Image.open(target) as img:
+            img.load()
+            try:
+                img = ImageOps.exif_transpose(img)  # 按 EXIF 方向摆正 (手机拍摄等)
+            except Exception as e:
+                logger.debug(f"缩略图方向校正失败, 使用原图方向: {e}")
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGBA" if img.mode in ("P", "LA", "PA") else "RGB")
+            img.thumbnail((_THUMB_SIZE, _THUMB_SIZE), Image.Resampling.LANCZOS)
+            tmp = thumb.with_name(f".{uuid.uuid4().hex}.tmp")
+            img.save(tmp, format="WEBP", quality=82, method=4)
+        os.replace(tmp, thumb)  # 原子替换: 并发请求也不会读到半张图
+        _prune_thumb_cache()
+    except Exception as e:
+        logger.debug(f"缩略图生成失败 {target}: {e}")
+        logger.opt(exception=True).debug("缩略图生成失败堆栈:")
+        try:
+            if tmp is not None and tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+
+
+# 清理节流: 原先每次生成缩略图都扫一遍缓存目录 (上限 2 万条 -> 2 万次 scandir+stat),
+# 改为最多每 _THUMB_PRUNE_INTERVAL 秒检查一次。
+_THUMB_PRUNE_INTERVAL = 60.0
+_thumb_prune_at = 0.0
+_thumb_prune_lock = threading.Lock()
+
+
+def _prune_thumb_cache() -> None:
+    """缓存文件数超过上限时删除最旧的一半 (缩略图随时可再生, 清理失败无影响)。
+
+    带节流: 一分钟内最多真正扫描一次, 避免每次生成缩略图都全量 stat 缓存目录。
+    """
+    global _thumb_prune_at
+    now = time.time()
+    with _thumb_prune_lock:
+        if now - _thumb_prune_at < _THUMB_PRUNE_INTERVAL:
+            return
+        _thumb_prune_at = now
+    try:
+        entries = [e for e in os.scandir(_THUMB_DIR) if e.is_file() and e.name.endswith(".webp")]
+        if len(entries) <= _THUMB_CAP:
+            return
+        entries.sort(key=lambda e: e.stat().st_mtime)
+        for e in entries[: len(entries) // 2]:
+            try:
+                os.unlink(e.path)
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------- 图片收藏 (我的收藏)
@@ -231,8 +453,12 @@ def _read_favorites() -> list:
         items = data.get("items", []) if isinstance(data, dict) else []
         out = []
         for it in items:
-            if isinstance(it, dict) and it.get("path") and Path(it["path"]).exists():
-                out.append(it)
+            if not (isinstance(it, dict) and it.get("path")):
+                continue
+            # 相对路径按 outputs 根解析 (兼容旧数据); 统一回绝对路径 posix, 与浏览接口 _abs 同形式
+            fp = Path(resolve_media_path(str(it["path"]))).as_posix()
+            if Path(fp).exists():
+                out.append({**it, "path": fp})
         return out
     except Exception:
         return []
@@ -255,6 +481,8 @@ async def favorites_add(payload: dict):
     path = str(payload.get("path") or "").strip()
     if not path:
         raise HTTPException(status_code=400, detail="图片路径不能为空")
+    # 统一存绝对路径 posix (相对路径按 outputs 根解析), 与 _read_favorites 输出/去重形式一致
+    path = Path(resolve_media_path(path)).as_posix()
     name = str(payload.get("name") or "").strip() or Path(path).name
     items = [x for x in _read_favorites() if x["path"] != path]
     items.insert(0, {"path": path, "name": name, "added_at": time.time()})
@@ -266,6 +494,8 @@ async def favorites_add(payload: dict):
 async def favorites_remove(payload: dict):
     """把一张图片移出收藏 (不删除文件)。"""
     path = str(payload.get("path") or "").strip()
+    if path:
+        path = Path(resolve_media_path(path)).as_posix()
     items = [x for x in _read_favorites() if x["path"] != path]
     _write_favorites(items)
     return {"items": items}
@@ -275,8 +505,11 @@ async def favorites_remove(payload: dict):
 
 
 @router.post("/upload")
-async def upload_files(files: list[UploadFile]):
-    upload_dir = BASE_DIR / "outputs" / "uploads"
+async def upload_files(files: list[UploadFile], subdir: str = "uploads"):
+    parts = [p for p in subdir.split("/") if p]
+    if not parts or any(not re.fullmatch(r"[\w\-]+", p) for p in parts):
+        raise HTTPException(status_code=400, detail="非法上传子目录")
+    upload_dir = BASE_DIR.joinpath("outputs", *parts)
     upload_dir.mkdir(parents=True, exist_ok=True)
     saved = []
     for file in files:
@@ -388,9 +621,18 @@ async def bg_list(payload: dict):
     if target is None or not target.is_dir():
         raise HTTPException(status_code=404, detail="文件夹不存在或无权访问")
     exts = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
-    files = sorted(str(p) for p in target.iterdir() if p.is_file() and p.suffix.lower() in exts)
+    # scandir: Windows 上 DirEntry 自带 stat 信息, 不必逐项 is_file() 再 stat
+    files = []
+    try:
+        with os.scandir(target) as it:
+            for entry in it:
+                if Path(entry.name).suffix.lower() in exts and entry.is_file(follow_symlinks=False):
+                    files.append(entry.path)
+    except OSError as e:
+        raise HTTPException(status_code=404, detail=f"读取文件夹失败: {e}")
     if not files:
         raise HTTPException(status_code=404, detail="文件夹中没有图片")
+    files.sort()
     return {"files": files[:500]}
 
 
@@ -421,6 +663,7 @@ def _migrate_legacy_bg_state():
         logger.info("已把根目录 bg_state.json 迁移到 outputs 目录")
     except Exception as e:
         logger.warning(f"迁移旧 bg_state.json 失败: {e}")
+        logger.opt(exception=True).debug("迁移旧 bg_state.json 失败堆栈:")
 
 
 _migrate_legacy_bg_state()
@@ -471,28 +714,14 @@ def bg_random_wallpaper(payload: dict = None):
     """
     import random as _random
 
-    import requests as _requests
-
     source = ((payload or {}).get("source") or "bing").strip().lower()
     errors = []
 
     # 0) Lolicon 随机动漫壁纸 (API v2: 仅横图 gt1, 非 R18; regular 规格省流量, pid 供前端展示)
     if source == "acg":
-
+        # 直连优先 / 失败自动改走系统代理: 统一实现在 utils.http (全项目同一套降级逻辑)
         def _fetch(method, url, **kw):
-            """直连优先 (实测比走系统代理快), 失败自动改走系统代理重试。"""
-            last = None
-            for trust_env in (False, True):
-                try:
-                    sess = _requests.Session()
-                    sess.trust_env = trust_env
-                    resp = sess.request(method, url, **kw)
-                    resp.raise_for_status()
-                    return resp
-                except Exception as e:
-                    last = e
-                    logger.warning(f"在线壁纸 Lolicon 请求失败 (trust_env={trust_env}): {e}")
-            raise last
+            return http_util.request(method, url, **kw)
 
         try:
             meta = _fetch(
@@ -521,43 +750,43 @@ def bg_random_wallpaper(payload: dict = None):
         except Exception as e:
             errors.append(f"Lolicon: {e}")
             logger.warning(f"在线壁纸 Lolicon 获取失败: {e}")
+            logger.opt(exception=True).debug("在线壁纸 Lolicon 获取失败堆栈:")
         raise HTTPException(status_code=502, detail="在线壁纸获取失败 (" + "; ".join(errors) + ")")
 
     # 1) Bing 每日壁纸
     for host in ("https://cn.bing.com", "https://www.bing.com"):
         try:
             idx = _random.randint(0, 7)
-            meta = _requests.get(
+            meta = http_util.get(
                 f"{host}/HPImageArchive.aspx",
                 params={"format": "js", "idx": idx, "n": 1},
                 timeout=8,
             )
-            meta.raise_for_status()
             images = meta.json().get("images") or []
             if not images or not images[0].get("url"):
                 raise RuntimeError("接口无数据")
             url = host + images[0]["url"]
             source = f"Bing 每日精选 · {images[0].get('copyright', '').split('(')[0].strip()}"
-            img = _requests.get(url, timeout=25)
-            img.raise_for_status()
+            img = http_util.get(url, timeout=25)
             return {"path": _save_api_wallpaper(img.content), "source": source}
         except Exception as e:
             errors.append(f"{host}: {e}")
             logger.warning(f"在线壁纸 Bing ({host}) 获取失败: {e}")
+            logger.opt(exception=True).debug("在线壁纸 Bing 获取失败堆栈:")
 
     # 2) Picsum 随机精选图 (兜底)
     try:
         seed = _random.randint(0, 10**9)
-        img = _requests.get(
+        img = http_util.get(
             f"https://picsum.photos/seed/{seed}/1920/1080",
             timeout=30,
             allow_redirects=True,
         )
-        img.raise_for_status()
         return {"path": _save_api_wallpaper(img.content), "source": "Picsum 随机精选"}
     except Exception as e:
         errors.append(f"Picsum: {e}")
         logger.warning(f"在线壁纸 Picsum 获取失败: {e}")
+        logger.opt(exception=True).debug("在线壁纸 Picsum 获取失败堆栈:")
 
     raise HTTPException(status_code=502, detail="在线壁纸获取失败 (" + "; ".join(errors) + ")")
 
@@ -565,12 +794,12 @@ def bg_random_wallpaper(payload: dict = None):
 @router.get("/bg/state")
 async def bg_state_get():
     """读取状态 (背景 + 自定义颜色/模糊), 跨端口与浏览器保留。"""
-    data = {"single": None, "folder": None, "interval": 120, "api": False}
+    data = {"single": None, "folder": None, "interval": 120, "api": False, "charm": True}
     if _BG_STATE_FILE.exists():
         try:
             data.update(json.loads(_BG_STATE_FILE.read_text(encoding="utf-8")))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"读取背景状态失败, 使用默认值: {e}")
     return data
 
 
@@ -578,7 +807,8 @@ async def bg_state_get():
 async def bg_state_save(payload: dict):
     """保存状态 (部分更新: 只更新提供的字段, 未提供的保留原值)。
 
-    支持字段: single / folder / interval (背景) 与 color / blur (外观)。
+    支持字段: single / folder / interval (背景), color / blur / art (外观)
+    与 charm (侧边栏晴天娃娃开关, 需要跨端口/浏览器/重启保留)。
     """
     data: dict = {}
     if _BG_STATE_FILE.exists():
@@ -612,6 +842,8 @@ async def bg_state_save(payload: dict):
     if "art" in payload:
         art = payload.get("art")
         data["art"] = art if isinstance(art, dict) and art.get("pid") else None
+    if "charm" in payload:
+        data["charm"] = bool(payload.get("charm"))
     _BG_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     _BG_STATE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"ok": True}
@@ -634,31 +866,20 @@ def hitokoto():
     """
     import concurrent.futures
 
-    import requests as _requests
-
     errors = []
 
     def _fetch(url: str) -> dict:
-        """直连优先 (与在线壁纸一致), 失败自动改走系统代理重试。"""
-        last = None
-        for trust_env in (False, True):
-            try:
-                sess = _requests.Session()
-                sess.trust_env = trust_env
-                resp = sess.get(url, timeout=8)
-                resp.raise_for_status()
-                data = resp.json()
-                text = (data.get("hitokoto") or "").strip()
-                if not text:
-                    raise RuntimeError("接口返回空句子")
-                return {
-                    "text": text,
-                    "from": (data.get("from") or "").strip(),
-                    "from_who": (data.get("from_who") or "").strip(),
-                }
-            except Exception as e:
-                last = e
-        raise last
+        """直连优先 (与在线壁纸一致), 失败自动改走系统代理重试: 见 utils.http。"""
+        resp = http_util.get(url, timeout=8)
+        data = resp.json()
+        text = (data.get("hitokoto") or "").strip()
+        if not text:
+            raise RuntimeError("接口返回空句子")
+        return {
+            "text": text,
+            "from": (data.get("from") or "").strip(),
+            "from_who": (data.get("from_who") or "").strip(),
+        }
 
     # 两个源并行请求, 取先成功的一个 (v1.hitokoto.cn 在国内有时很慢, 国际镜像兜底)
     urls = ("https://v1.hitokoto.cn/", "https://international.v1.hitokoto.cn/")
@@ -679,14 +900,39 @@ def hitokoto():
 psutil.cpu_percent(interval=None)
 
 _GPU_CACHE = {"t": 0.0, "data": None}
+# 采样节流 (与前端刷新间隔解耦, 不要互相"对齐": 之前 TTL 与轮询同为 1 秒, 缓存吸收不到任何请求,
+# 等于每秒 fork 一次 nvidia-smi)。成功结果最多复用 _GPU_TTL_OK 秒 (兜住多标签页/并发重复采样);
+# 取不到 (无独显 / 驱动异常 / 超时) 则退避 _GPU_TTL_FAIL 秒, 避免每次都真去起进程。前端见 web/js/components.js
+_GPU_TTL_OK = 8.0
+_GPU_TTL_FAIL = 60.0
+# nvidia-smi 不在 PATH (无独显 / 未装驱动) 是环境常态而非故障: 退避拉长到 10 分钟再探一次
+_GPU_TTL_NO_SMI = 600.0
+_GPU_CACHE["ttl"] = _GPU_TTL_FAIL
+# 同一类采样失败只上报一次: 前端每 10 秒轮询, 没必要反复刷同一条消息/堆栈
+_GPU_LOGGED: set[str] = set()
+
+
+def _gpu_note(key: str, msg: str, stack: bool = False) -> None:
+    """同一类采样失败只在首次上报, 避免周期性轮询反复刷同一条日志。"""
+    if key in _GPU_LOGGED:
+        return
+    _GPU_LOGGED.add(key)
+    logger.debug(msg)
+    if stack:
+        logger.opt(exception=True).debug("nvidia-smi 采样失败堆栈:")
 
 
 def _gpu_stats():
-    """通过 nvidia-smi 查询 GPU 占用; 结果缓存 1 秒 (与前端刷新频率一致)。"""
+    """通过 nvidia-smi 查询 GPU 占用; 成功按 _GPU_TTL_OK 复用, 失败时保留上一次的有效值。"""
     now = time.time()
-    if now - _GPU_CACHE["t"] < 1:
+    if now - _GPU_CACHE["t"] < _GPU_CACHE["ttl"]:
         return _GPU_CACHE["data"]
     try:
+        if shutil.which("nvidia-smi") is None:
+            # 没有 NVIDIA 独显或没装驱动: 起子进程必然 FileNotFoundError, 直接预检跳过
+            _gpu_note("no-smi", "未检测到 nvidia-smi (无 NVIDIA 显卡或未装驱动), 已跳过 GPU 采样")
+            _GPU_CACHE.update(t=now, ttl=_GPU_TTL_NO_SMI)
+            return _GPU_CACHE["data"]
         out = subprocess.run(
             [
                 "nvidia-smi",
@@ -695,20 +941,25 @@ def _gpu_stats():
             ],
             capture_output=True,
             text=True,
-            timeout=4,
+            timeout=1.5,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
         line = out.stdout.strip().splitlines()[0]
         name, util, mem_used, mem_total = [x.strip() for x in line.split(",")]
-        _GPU_CACHE["data"] = {
-            "name": name,
-            "util": float(util),
-            "mem_used": float(mem_used),
-            "mem_total": float(mem_total),
-        }
-    except Exception:
-        _GPU_CACHE["data"] = None  # 无独立显卡或 nvidia-smi 不可用
-    _GPU_CACHE["t"] = now
+        _GPU_CACHE.update(
+            data={
+                "name": name,
+                "util": float(util),
+                "mem_used": float(mem_used),
+                "mem_total": float(mem_total),
+            },
+            t=now,
+            ttl=_GPU_TTL_OK,
+        )
+    except Exception as e:
+        # 采样超时 / 输出解析异常: 保留上一次的有效值, 首次就失败则维持 None
+        _gpu_note("smi-error", f"nvidia-smi 采样失败: {e}", stack=True)
+        _GPU_CACHE.update(t=now, ttl=_GPU_TTL_OK if _GPU_CACHE["data"] is not None else _GPU_TTL_FAIL)
     return _GPU_CACHE["data"]
 
 
@@ -723,14 +974,26 @@ def _os_name():
         return platform.system()
 
 
+def _python_version():
+    """Python 版本: 非 CPython 实现 (PyPy 等) 带上实现名, 方便对照环境差异。"""
+    version = platform.python_version()
+    impl = platform.python_implementation()
+    return version if impl == "CPython" else f"{impl} {version}"
+
+
 @router.get("/system/stats")
-async def system_stats():
-    """系统版本与资源占用 (CPU / 内存 / GPU): 运行日志栏展示, 前端每 1 秒轮询。"""
+def system_stats():
+    """系统版本 / Python 版本与资源占用 (CPU / 内存 / GPU): 运行日志栏展示, 前端每 10 秒轮询。
+
+    同步 def: _gpu_stats 里的 nvidia-smi 是阻塞子进程, 放线程池执行,
+    不再周期性占用事件循环 (同 browse_images / hitokoto 的处理方式)。
+    """
     mem = psutil.virtual_memory()
     gpu = _gpu_stats()
     return {
-        "app_version": VERSION,
+        # 应用版本不在此重复返回: 前端统一读 /api/state 的 version (真源同为 utils/variable.VERSION)
         "os": _os_name(),
+        "python": _python_version(),
         "arch": platform.machine(),
         "cpu_percent": psutil.cpu_percent(interval=None),
         "cpu_cores": psutil.cpu_count(logical=True),
@@ -756,8 +1019,11 @@ async def wildcard_names(wildcard_type: str):
 
 @router.get("/wildcards/{wildcard_type}/cards")
 async def wildcard_cards(wildcard_type: str):
-    """列出卡片 (含封面信息), 用于网格展示。"""
-    return {"cards": wildcards.list_cards(wildcard_type)}
+    """列出卡片 (含封面信息), 用于网格展示。
+
+    卡片多时涉及大量文件 IO, 放线程池执行, 避免阻塞事件循环上的其它接口。
+    """
+    return {"cards": await run_in_threadpool(wildcards.list_cards, wildcard_type)}
 
 
 @router.post("/wildcards/{wildcard_type}/{wildcard_name}/cover")
@@ -872,15 +1138,65 @@ def _load_tags(csv_filename: str = "./assets/danbooru_tags_full_zh.csv"):
 
 _TAGS_CACHE: dict | None = None
 _ZH_MAP: dict | None = None
+_TAGS_LOCK = threading.Lock()
+
+
+def _tags_fingerprint() -> tuple | None:
+    """词典文件指纹 (mtime, size): 变化即自动重建缓存, 换词典不必重启进程。"""
+    try:
+        st = os.stat("./assets/danbooru_tags_full_zh.csv")
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def _build_tag_cache() -> dict:
+    """解析全词典为热度降序行表, 并构建「前 2 字符 -> 行号」倒排前缀桶。
+
+    桶内行号天然保持热度序; /api/suggest 的前缀层按 kw[:2] 取桶即可,
+    不再每次线性扫满 32.7 万行 (原实测单次 143-153ms)。
+    """
+    rows = [(tag.lower(), tag, cat, count, aliases, zh) for tag, cat, count, aliases, zh in _load_tags()]
+    exact2: dict = {}
+    alias2: dict = {}
+    for idx, row in enumerate(rows):
+        tag_l, aliases = row[0], row[4]
+        if len(tag_l) >= 2:
+            exact2.setdefault(tag_l[:2], []).append(idx)
+        for a in aliases:
+            if len(a) >= 2:
+                alias2.setdefault(a[:2], []).append(idx)
+    return {"rows": rows, "exact2": exact2, "alias2": alias2, "fp": _tags_fingerprint()}
 
 
 def _get_tag_cache() -> dict:
-    global _TAGS_CACHE
-    if _TAGS_CACHE is None:
-        _TAGS_CACHE = {
-            "rows": [(tag.lower(), tag, cat, count, aliases, zh) for tag, cat, count, aliases, zh in _load_tags()]
-        }
-    return _TAGS_CACHE
+    """标签缓存 (行表 + 前缀桶): 懒加载; 词典文件 mtime/大小变化时自动重建。
+
+    线程安全: suggest 等同步接口现在跑在线程池, 可能并发进来;
+    双检锁保证重建只发生一次, 重建期间旧缓存照常可用 (整体替换引用)。
+    """
+    global _TAGS_CACHE, _ZH_MAP
+    cache = _TAGS_CACHE
+    if cache is not None and cache["fp"] == _tags_fingerprint():
+        return cache
+    with _TAGS_LOCK:
+        cache = _TAGS_CACHE
+        if cache is None or cache["fp"] != _tags_fingerprint():
+            cache = _build_tag_cache()
+            _TAGS_CACHE = cache
+            _ZH_MAP = None  # 中文映射派生自行表, 必须一并失效
+        return cache
+
+
+def _reset_tag_cache() -> None:
+    """强制清空标签缓存与中文映射 (下次访问重建)。
+
+    词典文件 mtime/大小变化已由 _get_tag_cache 自动感知, 这里是显式入口:
+    替换词典但刻意保留原 mtime (如还原备份) 等场景下调用。
+    """
+    global _TAGS_CACHE, _ZH_MAP
+    _TAGS_CACHE = None
+    _ZH_MAP = None
 
 
 def _get_zh_map() -> dict:
@@ -898,11 +1214,22 @@ def _get_zh_map() -> dict:
 
 
 _SUGGEST_LIMIT = 20
+_SUGGEST_LAYER_CAP = 40  # 每层独立上限 (与原实现一致)
+_SUGGEST_SCAN_MAX_ROWS = 150_000  # 兜底线扫预算·行数 (原实现每次扫满 326,790 行)
+_SUGGEST_SCAN_MAX_MS = 100.0  # 兜底线扫预算·毫秒
 
 
 @router.post("/suggest")
-async def suggest_tags(payload: dict):
-    rows = _get_tag_cache()["rows"]
+def suggest_tags(payload: dict):
+    """提示词补全 (同步 def: FastAPI 会在线程池执行, 慢查询不再冻结 SSE 与生成提交)。
+
+    匹配优先级与原实现一致: 标签前缀 > 别名前缀 > 标签包含 > 别名包含 > 中文翻译包含。
+    前两层按 kw 前 2 字符从倒排前缀桶直接取 (桶内已热度序, 不再全表扫);
+    后三层是任意子串匹配, 保留线性扫但受行数/耗时双预算, 且凑满 20 条候选即提前退出。
+    (方案 P1-1: 深位次结果的排序手感可能与旧实现不同, 需拿常用词校准。)
+    """
+    cache = _get_tag_cache()
+    rows = cache["rows"]
     input_text = (payload.get("text") or "").strip().lower()
     keyword = input_text.split(",")[-1].strip().rstrip(",")
     if not keyword:
@@ -915,23 +1242,58 @@ async def suggest_tags(payload: dict):
     t_contains: list = []
     t_alias_sub: list = []
     t_zh: list = []
-    for tag_l, tag, cat, count, aliases, zh in rows:
-        if tag_l.startswith(kw_tag):
-            t_exact.append((tag, cat, count, "", zh))
-        else:
+    used: set = set()  # 已由前缀桶命中的行号: 扫描时跳过, 保持原实现的「一行只进一个层级」
+
+    if len(kw_tag) >= 2:
+        b = kw_tag[:2]
+        bucket = sorted(set(cache["exact2"].get(b, ())) | set(cache["alias2"].get(b, ())))
+        for idx in bucket:
+            if len(t_exact) >= _SUGGEST_LAYER_CAP:
+                break
+            tag_l, tag, cat, count, aliases, zh = rows[idx]
+            if tag_l.startswith(kw_tag):
+                t_exact.append((tag, cat, count, "", zh))
+                used.add(idx)
+            else:
+                hit = next((a for a in aliases if a.startswith(kw_tag)), None)
+                if hit is not None:
+                    t_exact.append((tag, cat, count, hit, zh))
+                    used.add(idx)
+
+    sealed = len(kw_tag) >= 2  # kw 满 2 字符时前缀层已被桶穷尽 (前缀命中必然同前 2 字符)
+    if len(t_exact) < _SUGGEST_LIMIT:
+        deadline = time.monotonic() + _SUGGEST_SCAN_MAX_MS / 1000.0
+        for idx, (tag_l, tag, cat, count, aliases, zh) in enumerate(rows):
+            if idx >= _SUGGEST_SCAN_MAX_ROWS or (idx % 512 == 0 and time.monotonic() > deadline):
+                break  # 扫描预算耗尽: 有多少回多少
+            if idx in used:
+                continue
+            # sealed 时以下前缀分支天然不触发 (全部前缀命中已在桶里处理);
+            # 1 字符 kw 没有桶可取, 前缀层同样靠这条扫描兜底
+            if tag_l.startswith(kw_tag):
+                if len(t_exact) < _SUGGEST_LAYER_CAP:
+                    t_exact.append((tag, cat, count, "", zh))
+                continue  # 本行归属前缀层: 即使被上限截断, 也不许降级进后面的层
             hit = next((a for a in aliases if a.startswith(kw_tag)), None)
             if hit is not None:
-                t_exact.append((tag, cat, count, hit, zh))
-            elif kw_tag in tag_l:
-                t_contains.append((tag, cat, count, "", zh))
+                if len(t_exact) < _SUGGEST_LAYER_CAP:
+                    t_exact.append((tag, cat, count, hit, zh))
+                continue
+            if kw_tag in tag_l:
+                if len(t_contains) < _SUGGEST_LAYER_CAP:
+                    t_contains.append((tag, cat, count, "", zh))
             else:
                 hit2 = next((a for a in aliases if kw_tag in a), None)
                 if hit2 is not None:
-                    t_alias_sub.append((tag, cat, count, hit2, zh))
+                    if len(t_alias_sub) < _SUGGEST_LAYER_CAP:
+                        t_alias_sub.append((tag, cat, count, hit2, zh))
                 elif zh and kw_zh in zh:
-                    t_zh.append((tag, cat, count, "", zh))
-        if len(t_exact) >= 40 and len(t_contains) >= 40 and len(t_alias_sub) >= 40 and len(t_zh) >= 40:
-            break
+                    if len(t_zh) < _SUGGEST_LAYER_CAP:
+                        t_zh.append((tag, cat, count, "", zh))
+            if len(t_exact) >= _SUGGEST_LIMIT:
+                break  # 前缀层自身凑满 20 条: 之后追加的都是更低热度项, 进不了前 20
+            if sealed and len(t_exact) + len(t_contains) >= _SUGGEST_LIMIT:
+                break  # 前缀层已被桶封板, 包含层又凑满窗口: 别名包含/中文层只会排在这两者之后, 不必再扫
     items = (t_exact + t_contains + t_alias_sub + t_zh)[:_SUGGEST_LIMIT]
     return {
         "keyword": keyword,
@@ -1020,8 +1382,8 @@ def _read_prompt_lib_meta():
             for key in meta:
                 if isinstance(data.get(key), list):
                     meta[key] = [str(x) for x in data[key]]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"读取提示词库元信息失败, 使用默认值: {e}")
     return meta
 
 
@@ -1085,6 +1447,7 @@ def _online_translate(text: str) -> str:
         return translate_en_to_zh(q)
     except Exception as e:
         logger.warning(f"在线翻译失败: {e}")
+        logger.opt(exception=True).debug("在线翻译失败堆栈:")
     return ""
 
 
@@ -1123,31 +1486,82 @@ def translate_online(payload: dict):
 
 
 # ---------------------------------------------------------------- 剩余点数 / 用量
-# 生成请求成功后由 utils.generator 更新全局缓存, 前端轮询展示; 返回 -1 表示尚未生成过
+# 启动时查询全部 Token, 生成后仅更新本次所用 Token, 前端按 Token 展示; 值为 -1 表示尚未查询到
+
+
+def _anlas_payload() -> dict:
+    """把按 Token 的剩余点数/用量 (点数 + 用量% + 订阅状态 + 下次恢复 1% 的秒数) 组装成前端要的形状。
+
+    active: 订阅是否有效 (对号/错号); recover_seconds: 下次恢复 1% 的秒数 (前端换算小时)。
+    """
+    from utils.generator import get_anlas_extra, get_anlas_snapshot
+    from utils.tokens import get_tokens, mask_token
+
+    snapshot = get_anlas_snapshot()
+    extras = get_anlas_extra()
+    tokens = get_tokens()
+    anlas_list = []
+    for i, token in enumerate(tokens):
+        anlas, remains = snapshot.get(token, (-1, -1))
+        active, recover_seconds = extras.get(token, (None, None))
+        anlas_list.append(
+            {
+                "index": i,
+                "token": mask_token(token),
+                "anlas": anlas,
+                "remains": remains,
+                "active": active,
+                "recover_seconds": recover_seconds,
+            }
+        )
+    return {"tokens": anlas_list}
 
 
 @router.get("/anlas")
 def get_anlas(refresh: bool = False):
-    """返回剩余点数/用量。
+    """返回全部 Token 的剩余点数/用量 (读缓存快照: 启动时查询一次, 生成后只更新所用 Token)。
 
-    - 默认: 最近一次生成后缓存的值 (未生成过为 -1)
-    - refresh=true: 实时调用 NovelAI 纯查询接口 /user/subscription 逐个 Token 查询
-      (**不消耗额度、不生成图片**), 并返回每个 Token 的明细。
+    - 默认: 读缓存快照, 零开销
+    - refresh=true: 兼容旧调用, 先做一次真实重查再返回 (纯查询接口, 不消耗额度)
+    - 想强制重查也可以走 POST /api/anlas/refresh (输出区右上角那个「刷新」按钮)
     """
-    from utils.generator import ANLAS, REMAINS, inquire_anlas_all
-
-    tokens = None
-    anlas, remains = ANLAS, REMAINS
     if refresh:
-        try:
-            tokens = inquire_anlas_all()
-        except Exception as e:  # noqa: BLE001
-            logger.debug(f"实时查询剩余点数失败: {e}")
-            tokens = []
-        if tokens:
-            anlas, remains = tokens[0]["anlas"], tokens[0]["remains"]
-    return {"anlas": anlas, "remains": remains, "tokens": tokens}
+        refresh_anlas()
+    return _anlas_payload()
 
+def get_anlas():
+    """返回全部 Token 的剩余点数/用量 (读缓存快照: 启动时查询一次, 生成后只更新所用 Token)。
+
+    想强制重新查询走 POST /api/anlas/refresh (输出区右上角那个「刷新」按钮)。
+    """
+    return _anlas_payload()
+
+
+@router.post("/anlas/refresh")
+def refresh_anlas():
+    """手动重查全部 Token 的剩余点数/用量, 返回刷新后的快照 (输出区右上角「刷新」按钮调用)。
+
+    与 GET 的区别: 这里会**真实请求 NovelAI** 的 /user/subscription, 所以是 POST (有副作用, 不该被缓存)。
+    查询是阻塞式外部 HTTP (每个 Token 最长 15s 连接 + 30s 读), 故用同步 def —— FastAPI 会把同步端点
+    丢进线程池执行, 不会卡住事件循环上的其它接口; 返回体与 GET 完全同形状, 前端可复用同一套渲染。
+    """
+    # 并发查询各 Token: 每个 Token 最坏 15s 连接 + 30s 读取, 串行时 5 个 Token 会把这个
+    # 线程池 worker 占住 ~225 秒 (期间其它同步接口排队)。线程内已是 requests 阻塞 IO,
+    # 开线程并发即可, 结果写入与串行一致 (按 Token 的字典缓存)。
+    import concurrent.futures
+
+    from utils.generator import inquire_all_anlas
+    from utils.tokens import get_tokens
+
+    tokens = get_tokens()
+    if len(tokens) <= 1:
+        inquire_all_anlas()
+    else:
+        from utils.generator import inquire_anlas
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(tokens))) as ex:
+            list(ex.map(inquire_anlas, tokens))
+    return _anlas_payload()
 
 @router.get("/anlas/history")
 def get_anlas_history(hours: float = 24):

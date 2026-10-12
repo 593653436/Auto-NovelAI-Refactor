@@ -2,11 +2,14 @@
 // 配置设置视图
 // ============================================================
 import { $, el, clear, toast, confirmDialog, sliderRow, applyPeekMode } from "../ui.js";
-import { post, get } from "../api.js";
+import { post, get, waitBackendBack } from "../api.js";
+import { onViewLeave } from "../viewLifecycle.js";
 
 
 let S = null;
 let fields = {};
+/** 共享开启后的"等链接就绪并跳转"轮询 (跨 render 保留, 便于离开视图时停掉) */
+let shareJumpTimer = null;
 
 export async function render(container, ctx) {
   S = ctx;
@@ -31,6 +34,11 @@ export async function render(container, ctx) {
   }
 
   let sharePollTimer = null;
+  // 离开设置页时必须停掉这两个轮询: 否则会一直打 /api/share (跳转轮询最长 10 分钟)
+  onViewLeave("settings", () => {
+    if (sharePollTimer) { clearInterval(sharePollTimer); sharePollTimer = null; }
+    if (shareJumpTimer) { clearInterval(shareJumpTimer); shareJumpTimer = null; }
+  });
   function startSharePolling() {
     if (sharePollTimer) return;
     sharePollTimer = setInterval(async () => {
@@ -131,6 +139,8 @@ export async function render(container, ctx) {
   cf("🔄 启动时检查更新", "check_update");
   cf("📝 格式化输入", "format_input", "删除多余空格和逗号或添加缺少的空格和逗号");
   cf("⚡ 跳过剩余点数/用量计算", "skip_inquire_anlas");
+  sf("🪫 剩余用量提醒%", "anlas_remind_percent", -1, 100, 1, "某 Token 剩余用量小于等于该值时发送一次提醒 (-1 为关闭); 配置了 SMTP 发邮件, 未配置则在右上角弹通知");
+  cf("🚭 用量为空时跳过 nai5 任务", "skip_nai5_no_usage", "NAI5 系列模型任务不分配给剩余用量为 0 的 Token (即使空闲); 全部 Token 无用量时跳过任务并提示");
   cf("🚫 删除 nsfw 标签", "remove_nsfw");
   cf("🔄 429 自动重试", "retry_429", "遇到 429 限流时无上限自动重试; 未开启时出错最多自动重试 3 次 (每次等待 5 秒, 仍失败则跳过该张继续生成)");
   cf("🧩 禁用全部插件", "disable_all_plugins");
@@ -214,19 +224,23 @@ export async function render(container, ctx) {
           shareLinkText.textContent = "⏳ 正在建立隧道, 请稍候 (首次使用需下载隧道程序)...";
           shareLinkText.removeAttribute("href");
           let n = 0;
-          const timer = setInterval(async () => {
+          // 用共享变量持有: onViewLeave 里要能停掉它 (原先只在自己回调内部 clearInterval,
+          // 用户切走视图后它仍会继续轮询最多 10 分钟)
+          if (shareJumpTimer) clearInterval(shareJumpTimer);
+          shareJumpTimer = setInterval(async () => {
+            const stop = () => { clearInterval(shareJumpTimer); shareJumpTimer = null; };
             try {
               const st = await get("/api/share");
-              if (st.url) { clearInterval(timer); location.href = st.url; return; }
+              if (st.url) { stop(); location.href = st.url; return; }
               if (st.error) {
-                clearInterval(timer);
+                stop();
                 refreshShareStatus();
                 toast(st.error, "error", 10000);
                 return;
               }
             } catch { /* 后端忙, 继续等 */ }
             if (++n >= 300) {
-              clearInterval(timer);
+              stop();
               toast("外网链接生成超时, 请检查网络后重新保存", "error", 8000);
             }
           }, 2000);
@@ -254,15 +268,7 @@ export async function render(container, ctx) {
     toast("🔄 正在重启 WebUI... 连接将短暂断开", "warning");
     try { await post("/api/settings/restart"); } catch { /* 连接断开即重启成功 */ }
     // 等待后端恢复后刷新原窗口 (不再打开新窗口)
-    let back = false;
-    for (let i = 0; i < 30; i++) {
-      await new Promise((r) => setTimeout(r, 400));
-      try {
-        const r = await fetch("/api/state");
-        if (r.ok) { back = true; break; }
-      } catch { /* 后端重启中 */ }
-    }
-    if (!back) toast("后端未响应, 请检查服务状态", "error");
+    if (!(await waitBackendBack())) toast("后端未响应, 请检查服务状态", "error");
     location.reload();
   });
 

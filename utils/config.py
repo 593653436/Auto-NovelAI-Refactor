@@ -11,8 +11,26 @@ import json
 from pathlib import Path
 from typing import Any
 
+from utils.logger import logger
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 SETTINGS_FILE = BASE_DIR / "settings.json"
+OUTPUTS_DIR = BASE_DIR / "outputs"
+
+
+def resolve_media_path(path):
+    """把前端传入的图片路径规范为绝对路径。
+
+    图片浏览接口 (/api/browse/images) 返回的是相对 outputs 的路径
+    (如 text2image/2026-09-01/xxx.png), 而进程启动时已把工作目录切到
+    项目根 (main.py), 相对路径直接按 CWD 解析找不到文件。统一规则:
+    绝对路径原样返回; 相对路径按 outputs 目录解析; 空值原样返回。
+    """
+    if not path:
+        return path
+    p = Path(path)
+    return p if p.is_absolute() else OUTPUTS_DIR / p
+
 
 DEFAULTS: dict[str, Any] = {
     "token": None,
@@ -30,6 +48,8 @@ DEFAULTS: dict[str, Any] = {
     "hide_terminal": False,
     "disable_all_plugins": False,
     "skip_inquire_anlas": False,
+    "anlas_remind_percent": 1,
+    "skip_nai5_no_usage": False,
     "format_input": True,
     "remove_nsfw": True,
     "smtp_num": 0,
@@ -54,11 +74,12 @@ _BOOL_KEYS = {
     "hide_terminal",
     "disable_all_plugins",
     "skip_inquire_anlas",
+    "skip_nai5_no_usage",
     "format_input",
     "remove_nsfw",
     "wework_mode",
 }
-_INT_KEYS = {"cool_time", "port", "smtp_num", "anlas_sample_interval"}
+_INT_KEYS = {"cool_time", "port", "smtp_num", "anlas_sample_interval", "anlas_remind_percent"}
 
 
 def _coerce(key: str, value: Any) -> Any:
@@ -93,8 +114,8 @@ def _migrate_from_env(data: dict) -> dict:
             key = key.strip()
             if key in DEFAULTS and not data.get(key):
                 data[key] = _coerce(key, value)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"读取 .env 配置失败, 使用默认值: {e}")
     return data
 
 

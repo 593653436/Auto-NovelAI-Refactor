@@ -42,7 +42,39 @@ async def director(payload: dict):
     except Exception as e:
         logger.error(f"提交导演工具任务失败: {e}")
         raise HTTPException(status_code=500, detail=f"提交任务失败: {e}")
+    if task is None:
+        raise HTTPException(status_code=429, detail="全部 Token 剩余用量已用完, 已跳过本次 NAI5 任务")
     return {"job_id": task.id, "queued": True, "position": gen_queue.position(task.id)}
+
+
+@router.get("/director/local-images")
+def director_local_images(dir: str = ""):
+    """列出目录顶层的图片文件, 供前端本地工具 (Pixel Snap) 批处理枚举输入。
+
+    目录扫描行为与后端导演工具 _input_images 对齐 (非递归, 排除 temp_ 临时文件)。
+    同步 def: 线程池执行, 网络盘目录遍历不阻塞事件循环。
+    """
+    import os
+    from pathlib import Path
+
+    if not dir:
+        raise HTTPException(status_code=400, detail="未指定目录")
+    p = Path(dir)
+    try:
+        p = p.resolve()
+    except OSError:
+        raise HTTPException(status_code=400, detail="无效的目录路径")
+    if not p.is_dir():
+        raise HTTPException(status_code=404, detail=f"目录不存在: {p}")
+    exts = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+    images = []
+    for f in sorted(os.listdir(p)):
+        if "temp_" in f.lower():
+            continue
+        fp = p / f
+        if fp.is_file() and fp.suffix.lower() in exts:
+            images.append(str(fp))
+    return {"images": images}
 
 
 # ---------------------------------------------------------------- 超分
@@ -88,26 +120,12 @@ async def pnginfo_to_generate(payload: dict):
         raise HTTPException(status_code=400, detail=f"解析失败: {e}")
 
 
-@router.post("/pnginfo/remove")
-async def remove_pnginfo(payload: dict):
-    try:
-        message = pnginfo_service.remove_pnginfo(
-            payload.get("image_path"),
-            payload.get("batch_path"),
-            payload.get("choices", []),
-            payload.get("info", ""),
-        )
-        return {"message": message}
-    except Exception as e:
-        logger.error(f"清除元数据失败: {e}")
-        raise HTTPException(status_code=400, detail=f"清除失败: {e}")
-
-
 # ---------------------------------------------------------------- 反推
 
 
 @router.post("/tagger")
-async def run_tagger(payload: dict):
+def run_tagger(payload: dict):
+    """反推 (同步 def: tagger 内 gradio_client 为阻塞网络 IO, FastAPI 会在线程池执行)。"""
     image_path = payload.get("image_path")
     if not image_path:
         raise HTTPException(status_code=400, detail="请先上传图片")
@@ -226,35 +244,35 @@ async def qwen_chat(payload: dict):
 
 @router.post("/selector/load")
 async def selector_load(payload: dict):
-    images, current = selector.load(payload.get("path", ""))
-    return {"images": images, "current": current}
+    images, current, error = selector.load(payload.get("path", ""))
+    return {"images": images, "current": current, "error": error}
 
 
 @router.post("/selector/next")
 async def selector_next(payload: dict = None):
-    images, current = selector.next_img((payload or {}).get("current"))
-    return {"images": images, "current": current}
+    images, current, error = selector.next_img((payload or {}).get("current"))
+    return {"images": images, "current": current, "error": error}
 
 
 @router.post("/selector/move")
 async def selector_move(payload: dict):
-    images, current = selector.move(payload.get("current"), payload.get("output_path", ""))
-    return {"images": images, "current": current}
+    images, current, error = selector.move(payload.get("current"), payload.get("output_path", ""))
+    return {"images": images, "current": current, "error": error}
 
 
 @router.post("/selector/copy")
 async def selector_copy(payload: dict):
-    images, current = selector.copy(payload.get("current"), payload.get("output_path", ""))
-    return {"images": images, "current": current}
+    images, current, error = selector.copy(payload.get("current"), payload.get("output_path", ""))
+    return {"images": images, "current": current, "error": error}
 
 
 @router.post("/selector/delete")
 async def selector_delete(payload: dict):
-    images, current = selector.delete(payload.get("current"))
-    return {"images": images, "current": current}
+    images, current, error = selector.delete(payload.get("current"))
+    return {"images": images, "current": current, "error": error}
 
 
 @router.post("/selector/undo")
 async def selector_undo():
-    images, current = selector.undo()
-    return {"images": images, "current": current}
+    images, current, error = selector.undo()
+    return {"images": images, "current": current, "error": error}

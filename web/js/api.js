@@ -2,8 +2,11 @@
 // API 客户端: 封装所有后端请求
 // ============================================================
 
-export async function request(method, url, body) {
-  const opts = { method, headers: {} };
+export async function request(method, url, body, extra = {}) {
+  // 本地 API 一律取最新: 禁用 HTTP 缓存, 否则 URL 固定的 GET (如 /api/hitokoto 一言)
+  // 会被浏览器缓存, 点击换一句拿到的还是旧响应
+  // extra 透传给 fetch (如 { signal } 供 AbortController 取消过期请求, 见 ui.js 补全)
+  const opts = { method, headers: {}, cache: "no-store", ...extra };
   if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
@@ -20,21 +23,27 @@ export async function request(method, url, body) {
   return res.json();
 }
 
-export const get = (url) => request("GET", url);
-export const post = (url, body) => request("POST", url, body ?? {});
-export const del = (url) => request("DELETE", url);
+export const get = (url, extra) => request("GET", url, undefined, extra);
+export const post = (url, body, extra) => request("POST", url, body ?? {}, extra);
+export const del = (url, extra) => request("DELETE", url, undefined, extra);
 
-/** 上传文件, 返回 [{name, path}] */
-export async function uploadFiles(files) {
-  const form = new FormData();
-  for (const f of files) form.append("files", f);
-  const res = await fetch("/api/upload", { method: "POST", body: form });
+/** 发一个不经过 JSON 封装的原始请求 (FormData / 无 body), 统一错误处理。 */
+async function rawRequest(url, { body, method = "POST" } = {}) {
+  const res = await fetch(url, { method, body });
   if (!res.ok) {
     let detail = `HTTP ${res.status}`;
-    try { detail = (await res.json()).detail || detail; } catch {}
+    try { detail = (await res.json()).detail || detail; } catch { /* 非 JSON 错误体 */ }
     throw new Error(detail);
   }
-  const data = await res.json();
+  return res.json();
+}
+
+/** 上传文件, 返回 [{name, path}]; subdir 可选 (如 "director/pixel_snap"), 默认 outputs/uploads */
+export async function uploadFiles(files, subdir = "") {
+  const form = new FormData();
+  for (const f of files) form.append("files", f);
+  const url = subdir ? "/api/upload?subdir=" + encodeURIComponent(subdir) : "/api/upload";
+  const data = await rawRequest(url, { body: form });
   return data.files;
 }
 
@@ -42,37 +51,19 @@ export async function uploadFiles(files) {
 export async function uploadDir(files) {
   const form = new FormData();
   for (const f of files) form.append("files", f);
-  const res = await fetch("/api/upload-dir", { method: "POST", body: form });
-  if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try { detail = (await res.json()).detail || detail; } catch {}
-    throw new Error(detail);
-  }
-  return res.json();
+  return rawRequest("/api/upload-dir", { body: form });
 }
 
 /** 弹出系统原生文件选择框, 返回真实绝对路径 (后端直接读取, 不上传)。 */
 export async function pickFile(ft = "") {
   const qs = ft ? "?ft=" + encodeURIComponent(ft) : "";
-  const res = await fetch("/api/pick-file" + qs, { method: "POST" });
-  if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try { detail = (await res.json()).detail || detail; } catch {}
-    throw new Error(detail);
-  }
-  const data = await res.json();
+  const data = await rawRequest("/api/pick-file" + qs);
   return data.path || "";
 }
 
 /** 弹出系统原生目录选择框, 返回真实绝对路径。 */
 export async function pickFolder() {
-  const res = await fetch("/api/pick-folder", { method: "POST" });
-  if (!res.ok) {
-    let detail = `HTTP ${res.status}`;
-    try { detail = (await res.json()).detail || detail; } catch {}
-    throw new Error(detail);
-  }
-  const data = await res.json();
+  const data = await rawRequest("/api/pick-folder");
   return data.path || "";
 }
 
@@ -94,4 +85,16 @@ export async function fetchLast() {
 /** 在系统文件管理器中打开目录 (默认 outputs 根目录) */
 export async function openDir(path) {
   return post("/api/open-dir", path ? { path } : {});
+}
+
+/** 等待后端重启完成: 每 400ms 轮询一次 /api/state, 最多 30 次 (约 12 秒); 返回 true=已恢复 */
+export async function waitBackendBack(times = 30, ms = 400) {
+  for (let i = 0; i < times; i++) {
+    await new Promise((r) => setTimeout(r, ms));
+    try {
+      const r = await fetch("/api/state");
+      if (r.ok) return true;
+    } catch { /* 后端重启中 */ }
+  }
+  return false;
 }

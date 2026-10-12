@@ -26,6 +26,7 @@ let aiChoiceRow = null;
 let inpaintCtlRow = null;
 let vibeBundleRow = null;
 let nai3VibeRow = null;
+let resHintEl = null;
 let charSection = null;
 let tabBtns = {};
 let tabBodies = {};
@@ -33,6 +34,8 @@ let refSection = null;
 let enhanceRow = null;
 let furryBtn = null;
 let furryMode = false; // 显式状态, 避免因 Twemoji 替换 DOM 后 textContent 不含 emoji 导致检测失败
+let tbBtn = null;          // "Transparent BG" 开关按钮 (正面提示词头部, 仅 v5 模型显示)
+let transparentBg = false; // 开启后生成时在用户提示词末尾追加 , transparent background
 let lastOutputPath = null;
 let selectedOutputPath = null; // 多张结果中当前选中的图片 (再次单击取消)
 let genStartViewed = null; // 点"开始生成"瞬间正在看的图 (用于生成后是否跟随跳转)
@@ -40,6 +43,15 @@ let genStartLastPath = null; // 点"开始生成"瞬间 allOutputImages 的最�
 let lastGeneratedImages = []; // 最近一次生成的全部图片 (供 wildcards 取最后一张做封面)
 let allOutputImages = []; // 本次会话累积生成的全部图片 (左右键查看, 刷新清空)
 let currentViewIdx = 0; // 输出查看器当前浏览的索引 (决定生成后是否跟随跳转)
+
+// 剩余点数/用量下拉徽标状态 (anlas-wrap: 容器, anlas-badge: 按钮, anlas-menu: 下拉面板)
+let anlasWrapEl = null;
+let anlasBadgeEl = null;
+let anlasMenuEl = null;
+let anlasSelected = 0;         // 徽标当前展示的 Token 序号
+let anlasMenuSig = "";         // 已渲染的 Token 列表指纹 (不变则就地更新文本, 不重建 DOM)
+let anlasOutsideBound = false; // 点击外部关闭下拉 (页面级只绑一次)
+let anlasRefreshBtn = null;    // 徽标右侧的「🔄 刷新」按钮 (手动重查剩余点数/用量)
 
 // ---------------- 控件工厂 ----------------
 
@@ -126,7 +138,7 @@ export async function render(container, ctx) {
   updateAiChoiceVisibility();
   bindEvents();
   wireOutputActions();
-  updateAnlasBadge(true); // 打开页面即实时查询一次剩余用量 (纯查询, 不消耗额度)
+  updateAnlasBadge(); // 打开页面即绘制一次剩余用量 (后端启动时已查询过; 想立即重查点徽标旁的「刷新」)
 }
 
 // ---------------- 启动加载: 从 last.json 恢复上次参数 ----------------
@@ -200,6 +212,61 @@ function stripUCPresetFromStart(text, model) {
   return { text: t, preset: null };
 }
 
+/**
+ * 检测预设完整标签串是否出现在提示词的"添加位置", 是则从那里剥离一次。
+ * 后端生成时: 正面质量预设追加 (append) 在提示词末尾, 负面 UC 预设前置 (prepend) 在开头,
+ * 故 position: "tail" = 只允许文本末尾整段命中 (末尾只剥一次, 前面再重复出现也不动);
+ *             "head" = 只允许文本开头整段命中 (同理)。非锚定位置出现相同标签不再视为命中。
+ * 按逗号段整体匹配, 大小写/空格不敏感; 长预设优先, 避免前缀重叠误判;
+ * 兼容 remove_nsfw (预设以 nsfw 开头而实际文本缺失该段)。
+ * 剥离时按字符偏移从原文裁掉命中的那一段 (连同紧邻的逗号/空白/换行分隔符),
+ * 其余文字保持读取时的原样 —— 换行、空格、权重符号等一概不重排、不重组。
+ * 命中返回 { text: 剥离后原文, preset: 预设名 }; 未命中返回 { text: 原文.trim(), preset: null }。
+ */
+function extractPresetTags(text, model, tableKey, position) {
+  const map = (S && S.app && S.app[tableKey]) ? (S.app[tableKey][model] || {}) : {};
+  const entries = Object.entries(map).filter(([, tags]) => tags);
+  entries.sort((a, b) => b[1].length - a[1].length); // 长标签优先
+  const norm = (s) => String(s).trim().toLowerCase().replace(/\s+/g, " ");
+  const src = String(text ?? "");
+  // 逗号切段并记录每段在原文中的字符区间; n 归一化用于匹配, 空段剔除但不影响锚定判断
+  const parts = [];
+  let cur = 0;
+  for (const seg of src.split(",")) { parts.push({ s: cur, e: cur + seg.length }); cur += seg.length + 1; }
+  const items = [];
+  for (const p of parts) { const n = norm(src.slice(p.s, p.e)); if (n) items.push({ s: p.s, e: p.e, n }); }
+  const isSep = (ch) => ch === "," || ch === " " || ch === "\t" || ch === "\n" || ch === "\r";
+  for (const [preset, tagsStr] of entries) {
+    const want = tagsStr.split(",").map(norm).filter(Boolean);
+    if (!want.length) continue;
+    const variants = [want];
+    if (want[0] === "nsfw" && want.length > 1) variants.push(want.slice(1));
+    for (const w of variants) {
+      if (w.length > items.length) continue;
+      const start = position === "head" ? 0 : items.length - w.length;
+      let hit = true;
+      for (let k = 0; k < w.length; k++) { if (items[start + k].n !== w[k]) { hit = false; break; } }
+      if (!hit) continue;
+      // 双向吃掉紧邻分隔符 (逗号+空白/换行), 剩余原文逐字符保留
+      let cutStart = items[start].s;
+      while (cutStart > 0 && isSep(src[cutStart - 1])) cutStart--;
+      let cutEnd = items[start + w.length - 1].e;
+      while (cutEnd < src.length && isSep(src[cutEnd])) cutEnd++;
+      return { text: src.slice(0, cutStart) + src.slice(cutEnd), preset };
+    }
+  }
+  return { text: src.trim(), preset: null };
+}
+
+/** 把预设下拉切到指定预设: 仅当该预设在当前可选列表中时才切换, 返回是否切换成功 */
+function applyPresetOption(sel, preset) {
+  if (!preset || !sel || typeof sel.set !== "function") return false;
+  const opts = sel.input && sel.input.options ? Array.from(sel.input.options).map((o) => o.value) : null;
+  if (opts && !opts.includes(preset)) return false;
+  sel.set(preset);
+  return true;
+}
+
 function gridNearest(v) {
   const opts = [0.1, 0.3, 0.5, 0.7, 0.9];
   let best = 0, bestD = Infinity;
@@ -259,6 +326,7 @@ function buildSavedState() {
     uc: negative.preset || (negative.text ? "None" : "Heavy"),
     quantity: stored.quantity ?? 1,
     furry_mode: stored.furry_mode ?? false,
+    transparent_bg: stored.transparent_bg ?? false,
     ai_choice: p.use_coords != null ? !p.use_coords : (stored.ai_choice ?? true),
     variety: p.skip_cfg_above_sigma != null ? true : (stored.variety ?? false),
     decrisp: p.dynamic_thresholding ?? stored.decrisp ?? false,
@@ -346,13 +414,14 @@ function promptField(title, presetCtl, opts) {
     el("div", { class: "prompt-head-right" }, [
       opts.loadBtn || null,
       wildcardsButton(ta, { title, text: "🃏 Wildcards" }),
+      opts.tbBtn || null,
       presetCtl.node,
     ]),
   ]);
   const taBox = el("div", { class: "ta-box" }, [ta]);
   wrap.append(head, taBox);
   wireAutocomplete(ta, taBox);
-  return { node: wrap, input: ta, get: () => ta.value, set: (v) => { ta.value = v; fit(); } };
+  return { node: wrap, input: ta, get: () => ta.value, set: (v) => { ta.value = v; fit(); }, refit: fit };
 }
 
 function buildPromptCard(saved) {
@@ -378,7 +447,11 @@ function buildPromptCard(saved) {
       else toast("没有找到上次的正面提示词", "warning");
     } catch (e) { toast(e.message, "error"); }
   });
-  C.positive = promptField("✨ 正面提示词", C.quality, { value: saved.positive_prompt ?? "", placeholder: "在此输入正面提示词...", rows: 6, loadBtn: loadPosBtn });
+  transparentBg = !!saved.transparent_bg;
+  tbBtn = el("button", { class: "mini-btn tb-btn", type: "button", text: "🪟 Transparent BG", title: "仅 v5 模型可用: 开启后生成时在提示词末尾追加 transparent background (质量预设之前)" });
+  tbBtn.addEventListener("click", () => { transparentBg = !transparentBg; updateTbBtn(); });
+  updateTbBtn();
+  C.positive = promptField("✨ 正面提示词", C.quality, { value: saved.positive_prompt ?? "", placeholder: "在此输入正面提示词...", rows: 6, loadBtn: loadPosBtn, tbBtn });
   card.append(C.positive.node);
 
   C.uc = cornerSelect("🚫 负面预设", S.app.uc_presets || []);
@@ -403,9 +476,23 @@ function buildPromptCard(saved) {
   card.append(C.negative.node);
   return card;
 }
+/** 当前输出查看器的键盘翻页监听器 (每次重建查看器时先摘掉上一个, 避免多代监听器同时触发) */
+let outputViewerOnKey = null;
+/** 当前查看器挂在 window 上的尺寸/滚动监听 (rect 缓存失效用), 重建时同样要摘掉 */
+let outputViewerOnViewport = null;
+// 悬停自动翻页的定时器/延迟: 上一轮 buildOutputViewer 的局部变量, 重建查看器时必须先清掉,
+// 否则它会持续调用旧 updateView() 把 lastOutputPath 写回上一代图片 (点"发送到图生图"发旧图的根因)
+let autoTimer = null;
+let autoDelay = null;
+
 /** 构建输出图片查看器: 单图显示 + 左右切换 + 下方缩略图导航 */
 function buildOutputViewer(container, images, startIdx = 0) {
   clear(container);
+  if (outputViewerOnKey) { document.removeEventListener("keydown", outputViewerOnKey); outputViewerOnKey = null; }
+  if (outputViewerOnViewport) outputViewerOnViewport();
+  // 清掉上一轮查看器可能仍在跑的悬停自动翻页定时器/延迟 (否则会把 lastOutputPath 写回上一代图片)
+  if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+  if (autoDelay) { clearTimeout(autoDelay); autoDelay = null; }
   container.classList.remove("gallery", "count-1", "count-2", "count-3", "count-4");
   container.classList.add("output-viewer");
   if (!images || images.length === 0) {
@@ -422,13 +509,18 @@ function buildOutputViewer(container, images, startIdx = 0) {
   mainWrap.append(prevBtn, nextBtn, mainImg);
   container.append(mainWrap);
 
-  // 缩略图条
+  // 缩略图条。
+  // 性能: 原先一次就给每张图建 <img> 并设 src, 100 张的批次会同时发起 100 个请求
+  // (还全部指向原图接口)。这里改为懒挂载: 首屏附近的几张立即取图, 其余等滚动到附近再取。
   const thumbStrip = el("div", { class: "output-viewer-thumbs" });
+  const HOVER_PRELOAD = 8;
   const thumbs = images.map((path, i) => {
-    const t = el("div", { class: "thumb-item" + (i === idx ? " active" : "") }, [
-      el("img", { src: imageUrl(path), loading: "lazy", alt: "第 " + (i + 1) + " 张" }),
-    ]);
+    const img = el("img", { decoding: "async", alt: "第 " + (i + 1) + " 张" });
+    img.dataset.src = imageUrl(path);
+    const t = el("div", { class: "thumb-item" + (i === 0 ? " active" : "") }, [img]);
     t.addEventListener("click", () => { idx = i; updateView(); });
+    // 当前图与左右各若干张立即加载, 保证切换时缩略图已就绪
+    if (Math.abs(i - idx) <= HOVER_PRELOAD) img.src = img.dataset.src;
     thumbStrip.append(t);
     return t;
   });
@@ -437,8 +529,7 @@ function buildOutputViewer(container, images, startIdx = 0) {
   try { edgeScroll(thumbStrip); } catch {}
 
   // 自动翻页 (悬停左右边缘)
-  let autoTimer = null;
-  let autoDelay = null;
+  // autoTimer / autoDelay 已提升为模块级变量, 在 buildOutputViewer 开头重建查看器时已被清掉
   function stopAuto() {
     if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
     if (autoDelay) { clearTimeout(autoDelay); autoDelay = null; }
@@ -457,37 +548,62 @@ function buildOutputViewer(container, images, startIdx = 0) {
   nextBtn.addEventListener("click", (e) => { e.stopPropagation(); stopAuto(); idx = Math.min(images.length - 1, idx + 1); updateView(); });
   nextBtn.addEventListener("mouseenter", () => startAuto(1));
   nextBtn.addEventListener("mouseleave", stopAuto);
-  // 悬停在主图左右各 30% 区域也触发自动翻页 (与箭头按钮联动), 点击直接切换
+  // 悬停在主图左右各 30% 区域也触发自动翻页 (与箭头按钮联动), 点击直接切换。
+  // 性能: getBoundingClientRect() 会强制同步布局, 原先每个 mousemove 都调用一次
+  // (每秒可达上百次)。这里只在鼠标进入 / 窗口尺寸变化 / 滚动时缓存 rect。
+  let viewRect = null;
+  const refreshRect = () => { viewRect = mainWrap.getBoundingClientRect(); };
+  const relX = (clientX) => {
+    if (!viewRect) refreshRect();
+    if (!viewRect || !viewRect.width) return 0.5;
+    return (clientX - viewRect.left) / viewRect.width;
+  };
+  const onViewportChange = () => { viewRect = null; };
+  // 记录清理函数: 重建查看器时摘掉这一代挂在 window 上的监听, 避免越积越多
+  if (outputViewerOnViewport) outputViewerOnViewport();
+  window.addEventListener("resize", onViewportChange);
+  window.addEventListener("scroll", onViewportChange, { passive: true, capture: true });
+  outputViewerOnViewport = () => {
+    window.removeEventListener("resize", onViewportChange);
+    window.removeEventListener("scroll", onViewportChange, { capture: true });
+    outputViewerOnViewport = null;
+  };
+
   mainWrap.addEventListener("click", (e) => {
-    const rect = mainWrap.getBoundingClientRect();
-    const rel = (e.clientX - rect.left) / rect.width;
-    if (rel < 0.3) { stopAuto(); idx = Math.max(0, idx - 1); updateView(); }
-    else if (rel > 0.7) { stopAuto(); idx = Math.min(images.length - 1, idx + 1); updateView(); }
+    const rel = relX(e.clientX);
+    if (rel < 0.3) { stopAuto(); idx = (idx - 1 + images.length) % images.length; updateView(); }
+    else if (rel > 0.7) { stopAuto(); idx = (idx + 1) % images.length; updateView(); }
   });
   mainWrap.addEventListener("mouseenter", (e) => {
-    const rect = mainWrap.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const rel = x / rect.width;
+    refreshRect();
+    const rel = relX(e.clientX);
     if (rel < 0.3) startAuto(-1);
     else if (rel > 0.7) startAuto(1);
   });
   mainWrap.addEventListener("mousemove", (e) => {
-    const rect = mainWrap.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const rel = x / rect.width;
-    if (!autoTimer && !autoDelay) {
-      mainWrap.classList.toggle("auto-flip-left", rel < 0.3);
-      mainWrap.classList.toggle("auto-flip-right", rel > 0.7);
-    }
+    if (autoTimer || autoDelay) return;
+    const rel = relX(e.clientX);
+    mainWrap.classList.toggle("auto-flip-left", rel < 0.3);
+    mainWrap.classList.toggle("auto-flip-right", rel > 0.7);
   });
-  mainWrap.addEventListener("mouseleave", stopAuto);
+  mainWrap.addEventListener("mouseleave", () => { viewRect = null; stopAuto(); });
+
+  /** 只给当前图附近的缩略图挂 src (远端的等靠近了再取, 避免一次发几十个请求) */
+  function ensureThumbLoaded(center) {
+    const from = Math.max(0, center - HOVER_PRELOAD);
+    const to = Math.min(thumbs.length - 1, center + HOVER_PRELOAD);
+    for (let i = from; i <= to; i++) {
+      const img = thumbs[i]?.firstElementChild;
+      if (img && !img.src && img.dataset.src) img.src = img.dataset.src;
+    }
+  }
 
   function updateView() {
     const path = images[idx];
     mainImg.src = imageUrl(path);
     mainImg.alt = "第 " + (idx + 1) + " / " + images.length + " 张";
     thumbs.forEach((t, i) => t.classList.toggle("active", i === idx));
-    currentViewIdx = idx;
+    ensureThumbLoaded(idx);
     setOutputSelection(path);
     // 缩略图条滚到当前查看的图 (生成后重建不再跑回开头, 停在当前/新图对应的缩略图)
     const at = thumbs[idx];
@@ -498,14 +614,23 @@ function buildOutputViewer(container, images, startIdx = 0) {
     }
   }
 
-  // 键盘左右键切换 (每次重建先解除旧监听, 只保留最新一个, 避免累积后按键叠加)
-  if (container._anrOnKey) document.removeEventListener("keydown", container._anrOnKey);
-  container._anrOnKey = function onKey(e) {
-    if (!container.isConnected) { document.removeEventListener("keydown", onKey); return; }
-    if (e.key === "ArrowLeft") { idx = Math.max(0, idx - 1); updateView(); e.preventDefault(); }
-    if (e.key === "ArrowRight") { idx = Math.min(images.length - 1, idx + 1); updateView(); e.preventDefault(); }
+  // 键盘左右键切换输出图片:
+  //   - 焦点在输入框/文本域/下拉/富文本内时完全不拦截, 保留光标移动与选择 (修复: 生成多图后提示词里方向键变成翻页)
+  //   - Ctrl/Alt/Meta 组合键与已被其它处理器消费的事件也放行
+  const onKey = (e) => {
+    if (!container.isConnected) {
+      document.removeEventListener("keydown", onKey);
+      if (outputViewerOnKey === onKey) outputViewerOnKey = null;
+      return;
+    }
+    if (e.ctrlKey || e.altKey || e.metaKey || e.defaultPrevented) return;
+    const t = e.target;
+    if (t instanceof Element && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
+    if (e.key === "ArrowLeft") { idx = (idx - 1 + images.length) % images.length; updateView(); e.preventDefault(); }
+    else if (e.key === "ArrowRight") { idx = (idx + 1) % images.length; updateView(); e.preventDefault(); }
   };
-  document.addEventListener("keydown", container._anrOnKey);
+  outputViewerOnKey = onKey;
+  document.addEventListener("keydown", onKey);
 
   // 单击主图放大 (单图时不设热区; 多图时左右 30% 翻页热区仍交给 mainWrap 翻页, 避免放大与翻页同时触发)
   mainImg.addEventListener("click", async (e) => {
@@ -541,6 +666,39 @@ function buildOutputViewer(container, images, startIdx = 0) {
 /** 更新 furry 按钮文本 (用显式状态, 不依赖 textContent: Twemoji 会把 emoji 换成 <img>) */
 function updateFurryBtn() {
   furryBtn.textContent = furryMode ? "🐾 Mode: Furry" : "🌸 Mode: Anime";
+}
+
+/** Transparent BG 按钮状态: 文案固定, 仅用激活样式 (.tb-on 主色高亮) 表示开/关 */
+function updateTbBtn() {
+  if (!tbBtn) return;
+  tbBtn.classList.toggle("tb-on", transparentBg);
+}
+
+/** 生成请求专用: 开关开启且当前为 v5 模型时, 在用户提示词末尾追加 transparent background
+ *  (后端随后才拼质量预设, 最终顺序 = furry 前缀 + 用户输入 + transparent background + 预设) */
+function promptWithTransparent() {
+  const base = String((C.positive && C.positive.get()) || "");
+  if (!transparentBg || !isNai5(C.model.get())) return base;
+  const norm = base.trimEnd();
+  if (!norm.trim()) return "transparent background";
+  if (/(?:transparency|transparent background)\s*$/i.test(norm)) return norm; // 末尾已有同类标签则不重复追加
+  return norm + ", transparent background";
+}
+
+/** 导入正面提示词时反向同步: 含有 transparent background 标签 (生成时由 Transparent BG 开关写入)
+ *  → 从文本剥离并开启开关; 不含 → 关闭开关。整段精确匹配 (大小写/首尾空格不敏感),
+ *  其余分段逐字保留 (含换行), 重组时只吸掉被删段自己的逗号 */
+function syncTransparentBg(text) {
+  const parts = String(text ?? "").split(",");
+  const keep = [];
+  let found = false;
+  for (const p of parts) {
+    if (p.trim().toLowerCase() === "transparent background") found = true;
+    else keep.push(p);
+  }
+  transparentBg = found;
+  updateTbBtn();
+  return found ? keep.join(",").trim() : String(text ?? "").trim();
 }
 
 function buildModelBar(bar, saved) {
@@ -776,6 +934,10 @@ function buildParamsTab(body, saved) {
   C.width.input?.addEventListener("change", () => posCanvas?.refreshRatio());
   C.height.input?.addEventListener("change", () => posCanvas?.refreshRatio());
   card.append(resRow);
+  // 像素数提示: 超过 1536×2048 时标红 (提交前仍会再拦一次)
+  resHintEl = el("div", { class: "muted", style: "margin:-6px 0 10px;font-size:12px;" });
+  card.append(resHintEl);
+  updateResHint();
 
   // 采样
   const samplerRow = el("div", { class: "field-row" });
@@ -822,7 +984,13 @@ function buildParamsTab(body, saved) {
   // Enhance
   enhanceRow = el("div", { style: "margin-top:12px;" }, [el("div", { class: "card-title", text: "✨ Enhance 增强" })]);
   C.enhance = field("启用 Enhance", "checkbox", { value: saved.enhance?.enabled ?? false });
-  C.enhanceAmount = field("放大倍数", "select", { options: ["1x", "1.5x", "2x"], value: saved.enhance?.amount ?? "1.5x" });
+  // 放大倍数: 1x / 1.5x; Max 仅 v5 系列 (保持纵横比放大到 1536×2048 面积上限)
+  const enhanceAmountOpts = enhanceAmounts(C.model.get());
+  C.enhanceAmount = field("放大倍数", "select", {
+    options: enhanceAmountOpts,
+    value: normalizeEnhanceAmount(saved.enhance?.amount, enhanceAmountOpts),
+  });
+  C.enhanceAmount.input.title = "Max 仅 v5 系列模型可选: 保持纵横比放大到 1536×2048 的面积上限 (宽高均为 64 的倍数)";
   C.magnitude = field("强度", "slider", { min: 1, max: 5, step: 1, value: saved.enhance?.magnitude ?? 1 });
   const enRow = el("div", { class: "field-row" });
   enRow.append(C.enhance.node, C.enhanceAmount.node, C.magnitude.node);
@@ -840,10 +1008,30 @@ function buildParamsTab(body, saved) {
   // 图生图 / 重绘
   const inpaintTitle = el("div", { class: "card-title", style: "margin-top:14px;", text: "🎨 图生图 / 局部重绘 / 涂鸦重绘" });
   const editorWrap = el("div");
-  editor = imageEditor(editorWrap, { onChange: () => updateInpaintVisibility() });
+  editor = imageEditor(editorWrap, {
+    onChange: () => updateInpaintVisibility(),
+    // 上传基础图片后: 分辨率自动对齐到图片尺寸最接近的 64 倍数。
+    // 编辑器内部已经把不是 64 倍数的图片居中裁剪过了 (cropToAlign64), 这里读到的
+    // naturalWidth/Height 仍是原图尺寸, 所以要用 round64 收敛 —— 两边算法一致, 结果必然相同。
+    onImageLoad: (img, info) => {
+      const srcW = img.naturalWidth || img.width;
+      const srcH = img.naturalHeight || img.height;
+      // 用编辑器给出的权威尺寸 (居中裁剪后的 64 倍数), 避免两边各算一次出现分歧
+      const w = info && info.dw ? info.dw : round64(srcW);
+      const h = info && info.dh ? info.dh : round64(srcH);
+      C.width.set(w);
+      C.height.set(h);
+      syncResolution();
+      if (info && info.cropped) {
+        toast(`📐 原图 ${srcW} × ${srcH} 已居中裁剪为 ${w} × ${h} (64 的倍数), 分辨率已同步`, "info", 6000);
+      } else {
+        toast(`📐 分辨率已随图片对齐: ${w} × ${h}`, "info");
+      }
+    },
+  });
   inpaintCtlRow = el("div", { class: "grid grid-3 hidden", style: "margin-top:12px;" });
   C.inpaintStrength = field("💪 强度", "slider", { min: 0.01, max: 0.99, step: 0.01, value: 0.7 });
-  C.inpaintNoise = field("🌫️ 噪声", "slider", { min: 0, max: 10, step: 0.01, value: 0 });
+  C.inpaintNoise = field("🌫️ 噪声", "slider", { min: 0, max: 0.99, step: 0.01, value: 0 });
   C.maskStrength = field("🧩 Mask Strength", "slider", { min: 0.01, max: 1, step: 0.01, value: 1 });
   inpaintCtlRow.append(C.inpaintStrength.node, C.inpaintNoise.node, C.maskStrength.node);
   card.append(inpaintTitle, editorWrap, inpaintCtlRow);
@@ -854,18 +1042,43 @@ function buildParamsTab(body, saved) {
 // ---------------- Row2 右: 输出 ----------------
 
 function buildRightPanel() {
-  // 徽标可点击立即查询 (纯查询接口, 不消耗额度)
-  const anlasBadge = el("span", {
-    class: "badge",
-    id: "anlas-badge",
-    style: "margin-left:auto;cursor:pointer;",
-    title: "点击立即查询剩余点数/用量 (纯查询, 不消耗额度)",
-  }, "点数: --");
-  anlasBadge.addEventListener("click", () => updateAnlasBadge(true));
+  // 剩余点数/用量: 下拉徽标 (多 Token 时避免标题行文本过长溢出, 点击展开选择查看的 Token)
+  anlasWrapEl = el("div", { class: "anlas-wrap" });
+  anlasBadgeEl = el("button", { class: "badge anlas-badge", id: "anlas-badge", type: "button", title: "剩余点数 / 用量" }, "点数: --");
+  anlasMenuEl = el("div", { class: "anlas-menu" });
+  anlasMenuEl.hidden = true;
+  anlasWrapEl.append(anlasBadgeEl, anlasMenuEl);
+  anlasBadgeEl.addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleAnlasMenu();
+  });
+  anlasMenuEl.addEventListener("click", (e) => {
+    const item = e.target.closest(".anlas-item");
+    if (!item) return;
+    anlasSelected = Number(item.dataset.idx) || 0;
+    toggleAnlasMenu(false);
+    updateAnlasBadge();
+  });
+  if (!anlasOutsideBound) {
+    anlasOutsideBound = true;
+    document.addEventListener("click", (e) => {
+      if (anlasWrapEl && !anlasWrapEl.contains(e.target)) toggleAnlasMenu(false);
+    });
+  }
+  // 紧挨徽标右侧的「刷新」按钮 (同一行、最右边): 手动重查剩余点数/用量
+  anlasRefreshBtn = el("button", {
+    class: "btn btn-sm anlas-refresh",
+    id: "anlas-refresh",
+    type: "button",
+    text: "🔄 刷新",
+    title: "立即重新查询剩余点数 / 用量 (会真实请求 NovelAI)",
+  });
+  anlasRefreshBtn.addEventListener("click", refreshAnlasNow);
   const card = el("div", { class: "card", style: "min-height:400px;display:flex;flex-direction:column;" }, [
     el("div", { class: "card-title" }, [
       "🖼️ 输出图片",
-      anlasBadge,
+      anlasWrapEl,
+      anlasRefreshBtn,
     ]),
   ]);
   genGalleryEl = el("div", { class: "gallery", style: "flex:1;" });
@@ -884,75 +1097,158 @@ function buildRightPanel() {
   return card;
 }
 
-/** 刷新右上角"剩余点数/用量"徽标
- *  - refresh=false: 读后端缓存 (生成结束后自动调用, 零开销)
- *  - refresh=true : 实时调 /api/anlas?refresh=1 逐个 Token 查询 (纯查询接口, 不消耗额度)
+/**
+ * 点「刷新」: 让后端真实重查一遍全部 Token, 再重画徽标。
+ * 徽标平时只在启动查询完成、生成结束或后端推送 anlas:update 时更新 —— 想立刻看到最新值就点它。
+ * 查询期间按钮禁用并显示"刷新中…", 防重复点击 (后端那次查询是同步的, 要走完外部 HTTP)。
  */
-async function updateAnlasBadge(refresh = false) {
-  const badge = document.getElementById("anlas-badge");
-  if (badge && refresh) badge.textContent = "点数: 查询中…";
+async function refreshAnlasNow() {
+  const btn = anlasRefreshBtn || document.getElementById("anlas-refresh");
+  if (!btn || btn.disabled) return;
+  const label = "🔄 刷新";
+  btn.disabled = true;
+  btn.textContent = "⏳ 刷新中…";
   try {
-    const res = await fetch("/api/anlas" + (refresh ? "?refresh=1" : ""));
-    const data = await res.json();
-    const b = document.getElementById("anlas-badge");
-    if (!b) return;
-    const list = Array.isArray(data.tokens) && data.tokens.length ? data.tokens : null;
-
-    if (list && list.length > 1) {
-      // 多 Token: 各通道额度独立, 逐个展示 ①8054点·86%  ②0点·2%
-      const marks = ["①", "②", "③", "④", "⑤"];
-      b.textContent = list
-        .map((t, i) => {
-          const a = Number(t.anlas);
-          const r = Number(t.remains);
-          const ok = Number.isFinite(a) && a >= 0;
-          return `${marks[i] || i + 1}${ok ? a : "?"}点·${Number.isFinite(r) && r >= 0 ? r : "?"}%`;
-        })
-        .join("  ");
-      b.title =
-        "各 Token 独立额度, 顺序与设置里的 Token 一致\n" +
-        list
-          .map((t, i) => {
-            const a = Number(t.anlas);
-            const r = Number(t.remains);
-            const secs = Number(t.next_percent_in);
-            const wait = Number.isFinite(secs) && secs > 0
-              ? ` (约 ${secs >= 3600 ? (secs / 3600).toFixed(1) + " 小时" : Math.ceil(secs / 60) + " 分钟"}后 +1%)`
-              : "";
-            const info = `${a >= 0 ? a + " 点" : "查询失败"} · 用量 ${r >= 0 ? r + "%" : "?"}${wait}`;
-            return `${i + 1}. ${t.token || "?"}: ${info}`;
-          })
-          .join("\n") +
-        "\n\n用量为 V5 起的\u201c用量上限电池\u201d百分比 (会自动回血)\n点击可再次查询 (纯查询接口, 不消耗额度)";
+    // 必须打 /api/anlas/refresh: /api/anlas 只回缓存快照, 点多少次都刷不出新值
+    const data = await post("/api/anlas/refresh");
+    await updateAnlasBadge();
+    const list = Array.isArray(data?.tokens) ? data.tokens : [];
+    if (!list.length) {
+      toast("未配置 Token, 无法查询剩余点数 / 用量", "warning");
+    } else if (!list.some((t) => Number(t.anlas) >= 0)) {
+      toast("刷新完成, 但仍未查询到点数 —— 检查设置里的「⚡ 跳过剩余点数/用量计算」或 Token 是否有效", "warning");
     } else {
-      const src = list ? list[0] : data;
-      const a = Number(src.anlas);
-      const r = Number(src.remains);
-      b.textContent = Number.isFinite(a) && Number.isFinite(r) && a >= 0
-        ? `点数: ${a} · 用量: ${r}%`
-        : "点数: -- · 用量: --";
-      b.title = "点击立即查询剩余点数/用量 (纯查询, 不消耗额度)";
+      toast(`剩余点数 / 用量已刷新 (${list.length} 个 Token)`, "success");
     }
-
-    // 有 Token 快用尽时标红, 状态一眼可辨
-    const low = !!list && list.some((t) => Number(t.remains) >= 0 && Number(t.remains) <= 10);
-    b.style.color = low ? "#e5484d" : "";
-  } catch {
-    const b = document.getElementById("anlas-badge");
-    if (b && refresh) b.textContent = "点数: 查询失败";
+  } catch (e) {
+    toast("刷新剩余点数失败: " + (e?.message || e), "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
   }
+}
+
+/** 展开/收起剩余点数/用量下拉面板 (force 省略时切换) */
+function toggleAnlasMenu(force) {
+  if (!anlasMenuEl) return;
+  const open = force !== undefined ? force : anlasMenuEl.hidden;
+  anlasMenuEl.hidden = !open;
+  anlasBadgeEl?.classList.toggle("open", open);
+  if (open) updateAnlasBadge();
+}
+
+/** 刷新右上角"剩余点数/用量"下拉徽标 (启动时查询全部 Token, 生成结束与页面加载时更新, 生成后仅本次所用 Token 变化) */
+let anlasRetryTimer = 0;
+let anlasRetryCount = 0;
+function anlasEntryText(t) {
+  const a = Number(t.anlas);
+  const r = Number(t.remains);
+  const ok = Number.isFinite(a) && Number.isFinite(r) && a >= 0;
+  const name = t.token || "Token";
+  return ok ? `${name} · 点数: ${a} · 用量: ${r}%` : `${name} · 未查询到`;
+}
+
+/** 下拉行: 订阅状态 emoji (本地 Twemoji 资源 ✅/❌, 跨设备显示一致) */
+function anlasStatusText(t) {
+  if (t.active === true) return "✅";   // 2705.svg
+  if (t.active === false) return "❌";  // 274c.svg
+  return "·";                           // 尚未查询到
+}
+
+/** 下拉行: "下次恢复1%: x.xx 小时" (秒 -> 小时, 保留两位小数) */
+function anlasRecoverText(t) {
+  const s = Number(t.recover_seconds);
+  if (!Number.isFinite(s) || s < 0) return "下次恢复1%: --";
+  return `下次恢复1%: ${(s / 3600).toFixed(2)} 小时`;
+}
+
+async function updateAnlasBadge() {
+  try {
+    // 读缓存快照即可: 后端启动时已查询过, 生成后也会更新; 想立刻重查走 refreshAnlasNow()
+    const res = await fetch("/api/anlas");
+    const data = await res.json();
+    const badge = anlasBadgeEl || document.getElementById("anlas-badge");
+    if (!badge) return;
+    const list = Array.isArray(data.tokens) ? data.tokens : [];
+    if (!list.length) {
+      badge.textContent = "点数: --";
+      badge.title = "未配置 Token, 无法查询剩余点数 / 用量";
+      if (anlasMenuEl) anlasMenuEl.replaceChildren();
+      anlasMenuSig = "";  // 列表清空: 下次有数据时强制重建
+      return;
+    }
+    // 启动查询尚未完成 (全部为 -1 哨兵值): 短暂自动重试; 查询完成后后端也会推送 anlas:update 主动刷新
+    const ready = list.some((t) => Number(t.anlas) >= 0);
+    if (ready) {
+      if (anlasRetryTimer) { clearTimeout(anlasRetryTimer); anlasRetryTimer = 0; }
+      anlasRetryCount = 0;
+    } else if (anlasRetryCount < 10) {
+      anlasRetryCount++;
+      if (!anlasRetryTimer) {
+        anlasRetryTimer = setTimeout(() => { anlasRetryTimer = 0; updateAnlasBadge(); }, 3000);
+      }
+    }
+    // 徽标只显示当前选中的 Token (多 Token 时避免文本溢出, 下拉面板内查看全部)
+    const cur = list.find((t) => (t.index ?? 0) === anlasSelected) || list[0];
+    anlasSelected = cur.index ?? 0;
+    badge.textContent = `${anlasStatusText(cur)} ${anlasEntryText(cur)}`;
+    badge.title = list.length > 1
+      ? "点击选择查看的 Token (启动时查询全部, 生成后只更新本次所用 Token)"
+      : "剩余点数 / 用量 (启动时查询, 生成后只更新本次所用 Token)";
+    if (!anlasMenuEl) return;
+    // 只有 Token 列表本身变了 (数量/打码后的名字) 才重建 DOM; 其余情况就地更新文本,
+    // 避免每次 anlas:update / job:done / 3 秒重试都整段 replaceChildren。
+    const sig = list.map((t) => `${t.index ?? 0}:${t.token || ""}`).join("|");
+    if (sig !== anlasMenuSig || anlasMenuEl.childElementCount === 0) {
+      anlasMenuSig = sig;
+      anlasMenuEl.replaceChildren(
+        ...list.map((t) => {
+          const item = el("div", { class: "anlas-item" }, [
+            el("span", { class: "anlas-status" }),
+            el("span", { class: "anlas-item-name", text: t.token || "Token" }),
+            el("span", { class: "anlas-item-val" }),
+            el("span", { class: "anlas-item-recover" }),
+          ]);
+          item.dataset.idx = String(t.index ?? 0);
+          return item;
+        }),
+        el("div", { class: "anlas-note muted", text: "剩余点数及用量 · 恢复时间在查询时更新" }),
+      );
+    }
+    const rows = anlasMenuEl.querySelectorAll(".anlas-item");
+    list.forEach((t, i) => {
+      const row = rows[i];
+      if (!row) return;
+      const idx = t.index ?? 0;
+      const active = idx === anlasSelected;
+      if (active !== row.classList.contains("active")) row.classList.toggle("active", active);
+      const status = row.querySelector(".anlas-status");
+      const title = t.active === true ? "订阅有效" : t.active === false ? "订阅无效/未激活" : "尚未查询";
+      const statusText = anlasStatusText(t);
+      if (status.textContent !== statusText) status.textContent = statusText;
+      if (status.title !== title) status.title = title;
+      const val = Number.isFinite(Number(t.anlas)) && Number(t.anlas) >= 0
+        ? `点数: ${Number(t.anlas)} · 用量: ${Number(t.remains)}%`
+        : "未查询到";
+      const valEl = row.querySelector(".anlas-item-val");
+      if (valEl.textContent !== val) valEl.textContent = val;
+      const rec = anlasRecoverText(t);
+      const recEl = row.querySelector(".anlas-item-recover");
+      if (recEl.textContent !== rec) recEl.textContent = rec;
+    });
+  } catch {}
 }
 
 function wireOutputActions() {
   sendPnginfoBtn.addEventListener("click", async () => {
     if (!lastOutputPath) return;
+    const path = lastOutputPath;
     const { showView } = await import("../app.js");
-    const { pnginfoPicker } = await import("./pnginfo.js");
+    const pnginfoMod = await import("./pnginfo.js");
     await showView("pnginfo");
-    if (pnginfoPicker && pnginfoPicker.set) {
-      pnginfoPicker.set(lastOutputPath);
-      if (pnginfoPicker.onChange) pnginfoPicker.onChange(lastOutputPath);
-    }
+    // openWithImage: 渲染完成后经模块命名空间实时取用 (pnginfoPicker 是 export let, 首渲染才赋值),
+    // 并强制切回"读取信息"页签 —— 否则上次停留的反推/抹除页签会一直显示旧图片, 看起来像"发送了以前的图"
+    pnginfoMod.openWithImage(path);
   });
   sendBtn.addEventListener("click", () => sendToImg2img(lastOutputPath));
   openDirBtn.addEventListener("click", async () => {
@@ -970,6 +1266,16 @@ function wireOutputActions() {
 function isNai3(model) { return model === "nai-diffusion-3" || model === "nai-diffusion-furry-3"; }
 function isNai5(model) { return model === "nai-diffusion-5-full" || model === "nai-diffusion-5-curated"; }
 function isNai45(model) { return model === "nai-diffusion-4-5-full" || model === "nai-diffusion-4-5-curated"; }
+
+/** Enhance 放大倍数选项: 1x / 1.5x; Max 仅 v5 系列 (保持纵横比放大到 1536×2048 面积上限) */
+function enhanceAmounts(model) {
+  return isNai5(model) ? ["1x", "1.5x", "Max"] : ["1x", "1.5x"];
+}
+
+/** 归一化缓存的放大倍数: 旧版 2x 或当前模型不支持的 Max 一律回退 1.5x */
+function normalizeEnhanceAmount(amount, options) {
+  return options.includes(amount) ? amount : "1.5x";
+}
 
 function setVisible(ctrl, visible) {
   ctrl.node.style.display = visible ? "" : "none";
@@ -1031,6 +1337,9 @@ async function applyModelChange(initial = false) {
   const nai5 = isNai5(model);
   const nai45 = isNai45(model);
 
+  // Transparent BG 按钮仅 v5 系列模型显示; 非 v5 时追加逻辑也自动失效 (promptWithTransparent 内有双重判断)
+  if (tbBtn) tbBtn.style.display = nai5 ? "" : "none";
+
   // 采样器: nai3 保留 ddim_v3, 其余移除
   const samplers = nai3 ? S.app.samplers : S.app.samplers.filter((s) => s !== "ddim_v3");
   C.sampler.setOptions?.(samplers);
@@ -1069,6 +1378,13 @@ async function applyModelChange(initial = false) {
   setVisible(C.sm, nai3);
   setVisible(C.smDyn, nai3 && C.sm.get());
   setVisible(C.legacyUc, model === "nai-diffusion-4-full" || model === "nai-diffusion-4-curated-preview");
+
+  // Enhance 放大倍数: Max 仅在 v5 系列出现; 切换模型后当前值不可用则回退 1.5x
+  // (必须先取值: setOptions 重建 option 后, 失效的旧值会被浏览器重置成第一项)
+  const enhAmounts = enhanceAmounts(model);
+  const curEnhAmount = C.enhanceAmount.get();
+  C.enhanceAmount.setOptions?.(enhAmounts);
+  if (!enhAmounts.includes(curEnhAmount)) C.enhanceAmount.set("1.5x");
 
   // furry 按钮: nai3 隐藏并复位
   furryBtn.style.display = nai3 ? "none" : "";
@@ -1115,6 +1431,61 @@ async function applyModelChange(initial = false) {
 
 // ---------------- 事件绑定 ----------------
 
+/** 对齐到最接近的 64 的倍数 (下限 64, 与后端 return_x64 一致); 供手动输入与图片上传共用 */
+function round64(v) {
+  const n = Math.round(Number(v) / 64) * 64;
+  return Number.isFinite(n) && n >= 64 ? n : 64;
+}
+
+// 分辨率上限: 宽高乘积不得大于 1536×2048 (与后端 ENHANCE_MAX_SIZE 一致, 提交前拦截)
+const MAX_RESOLUTION_LABEL = "1536×2048";
+const MAX_RESOLUTION_PIXELS = 1536 * 2048;
+const MIN_SIDE = 64;
+
+/** 校验分辨率是否合法, 合法返回 null, 否则返回给用户看的错误说明。
+ *  规则: 宽高均为不小于 64 的数, 且 宽 × 高 ≤ 1536 × 2048。 */
+function validateResolution(width, height) {
+  const w = Number(width);
+  const h = Number(height);
+  if (!Number.isFinite(w) || !Number.isFinite(h) || Math.round(w) < MIN_SIDE || Math.round(h) < MIN_SIDE) {
+    return `分辨率不合法: 宽高必须是不小于 ${MIN_SIDE} 的整数 (当前 ${width}×${height})`;
+  }
+  const pixels = Math.round(w) * Math.round(h);
+  if (pixels > MAX_RESOLUTION_PIXELS) {
+    return `分辨率 ${Math.round(w)}×${Math.round(h)} = ${pixels.toLocaleString()} 像素, 超过上限 ${MAX_RESOLUTION_LABEL} (${MAX_RESOLUTION_PIXELS.toLocaleString()} 像素), 请调低宽或高`;
+  }
+  return null;
+}
+
+/** 刷新分辨率行下方的像素数提示, 超上限时标红 (裁剪重绘例外, 见下) */
+function updateResHint() {
+  if (!resHintEl) return;
+  const w = Number(C.width?.get());
+  const h = Number(C.height?.get());
+  if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) {
+    resHintEl.textContent = "";
+    resHintEl.className = "muted";
+    return;
+  }
+  const pixels = Math.round(w) * Math.round(h);
+  const over = pixels > MAX_RESOLUTION_PIXELS;
+  // 裁剪重绘: 成图取原图尺寸、送进模型的是生成块 (面积 ≤ 1024×1024), 面板宽高不参与出图,
+  // 所以超上限也不算"无法生成" —— 这里只提示一下, 不标红。
+  const cropRedraw = !!editor?.isCropActive?.();
+  if (over && cropRedraw) {
+    resHintEl.textContent =
+      `像素 ${pixels.toLocaleString()} / 上限 ${MAX_RESOLUTION_PIXELS.toLocaleString()} — 超出 ${MAX_RESOLUTION_LABEL}, 但裁剪重绘按生成块出图, 成图仍是原图尺寸, 可以生成`;
+    resHintEl.className = "";
+    resHintEl.style.color = "var(--text-2)";
+    return;
+  }
+  resHintEl.textContent = over
+    ? `⚠️ 像素 ${pixels.toLocaleString()} / 上限 ${MAX_RESOLUTION_PIXELS.toLocaleString()} — 超出 ${MAX_RESOLUTION_LABEL}, 无法生成`
+    : `像素 ${pixels.toLocaleString()} / 上限 ${MAX_RESOLUTION_PIXELS.toLocaleString()} (${MAX_RESOLUTION_LABEL})`;
+  resHintEl.className = "";
+  resHintEl.style.color = over ? "var(--danger)" : "var(--text-2)";
+}
+
 function bindEvents() {
   C.model.input?.addEventListener("change", () => applyModelChange());
   C.resolution.input?.addEventListener("change", () => {
@@ -1123,11 +1494,32 @@ function bindEvents() {
       const [w, h] = res.split("x").map(Number);
       C.width.set(w);
       C.height.set(h);
+      syncEditorResolution();   // 分辨率变了, 图生图区域的图片跟着调整到对应大小
     }
     charRegion?.refresh?.();
+    updateResHint();
   });
-  C.width.input?.addEventListener("change", () => syncResolution());
-  C.height.input?.addEventListener("change", () => syncResolution());
+  // 自定义分辨率: 失焦/回车后自动对齐到最接近的 64 的倍数 (round64 为模块级函数)
+  const snap64 = (c, label) => {
+    const before = String(c.get()).trim();
+    // 空/非法输入不吸附也不调整图片 (若兜底成 64 会把图生图区域缩成一条), 等用户填上真正的数字
+    if (before === "" || !Number.isFinite(Number(before))) {
+      syncResolution();
+      return;
+    }
+    const after = round64(before);
+    if (String(after) !== before) {
+      c.set(after);
+      syncResolution();
+      toast(`📐 ${label}已对齐到 64 的倍数: ${after}`, "info");
+    } else {
+      syncResolution();
+    }
+    // 分辨率变了 (含输入值本身就是 64 倍数的情况), 图生图区域的图片跟着调整到对齐后的对应大小
+    syncEditorResolution();
+  };
+  C.width.input?.addEventListener("change", () => snap64(C.width, "宽"));
+  C.height.input?.addEventListener("change", () => snap64(C.height, "高"));
   C.sm.input?.addEventListener("change", () => setVisible(C.smDyn, isNai3(C.model.get()) && C.sm.get()));
   C.generateBtn.addEventListener("click", onGenerate);
   C.stopBtn.addEventListener("click", async () => {
@@ -1135,6 +1527,8 @@ function bindEvents() {
   });
   bus.on("job:done", onJobDone);
   bus.on("job:failed", onJobFailed);
+  // 启动查询 / 生成后按 Token 更新点数用量时, 后端会推送 anlas:update 事件, 徽标自动刷新
+  bus.on("anlas:update", updateAnlasBadge);
 }
 
 function syncResolution() {
@@ -1142,11 +1536,31 @@ function syncResolution() {
   const res = S.app.resolutions.includes(`${w}x${h}`) ? `${w}x${h}` : "自定义";
   C.resolution.set(res);
   charRegion?.refresh?.();
+  updateResHint();
+}
+
+/**
+ * 分辨率改变时, 把图生图区域的图片调整到 64 对齐后的对应尺寸。
+ * 编辑器内部会把底图 / 蒙版 / 涂鸦 / 裁剪选框一并缩放, 保证送进模型的输入与面板分辨率一致。
+ * 只在用户手动改宽/高或切换分辨率预设时调用 —— 上传图片时图片本身就是画布尺寸, 无需调整。
+ */
+function syncEditorResolution() {
+  if (!editor?.hasImage?.()) return;
+  const rawW = Number(C.width.get());
+  const rawH = Number(C.height.get());
+  if (!Number.isFinite(rawW) || !Number.isFinite(rawH) || rawW < MIN_SIDE || rawH < MIN_SIDE) return;
+  const w = round64(rawW);
+  const h = round64(rawH);
+  if (editor.resizeTo(w, h)) {
+    toast(`📐 图生图区域的图片/蒙版已调整到 ${w} × ${h}`, "info", 4000);
+  }
 }
 
 function updateInpaintVisibility() {
   if (!inpaintCtlRow) return;
   inpaintCtlRow.classList.toggle("hidden", !editor.hasImage());
+  // 裁剪重绘的框选状态会影响分辨率上限的判定 (见 onGenerate / updateResHint), 这里一并刷新
+  updateResHint();
 }
 
 // ---------------- 收集请求 ----------------
@@ -1174,7 +1588,7 @@ async function collectRequest() {
 
   return {
     model: C.model.get(),
-    positive_prompt: C.positive.get(),
+    positive_prompt: promptWithTransparent(),
     negative_prompt: C.negative.get(),
     furry_mode: furryMode,
     quality_preset: C.quality.get(),
@@ -1209,6 +1623,29 @@ async function collectRequest() {
 async function onGenerate() {
   genStartViewed = selectedOutputPath; // 记录点击生成瞬间正在看的图
   genStartLastPath = allOutputImages.length ? allOutputImages[allOutputImages.length - 1] : null; // 记录瞬间的最后一张 (并发基准)
+  // 先校验分辨率: 不合法 (超过 1536×2048) 直接拦下, 不发请求, 也不做 inpaint 导出等重活。
+  // 取值规则与 collectRequest 一致: 空值回落到 832×1216 (后端默认), 不把"留空"当成非法。
+  //
+  // 例外: 裁剪重绘已框选时跳过这个上限 —— 那种情况下真正送进模型的是"生成块"
+  // (面积 ≤ 1024×1024), 成图尺寸又是原图尺寸, 面板上填的宽高根本不参与出图,
+  // 所以没必要因为面板填大了就把用户拦在门外。
+  const cropRedraw = !!editor?.isCropActive?.();
+  const gateW = Number(C.width.get()) || 832;
+  const gateH = Number(C.height.get()) || 1216;
+  const resError = cropRedraw ? null : validateResolution(gateW, gateH);
+  if (resError) {
+    infoEl.textContent = "❌ " + resError;
+    toast(resError, "error", 7000);
+    C.width.input?.focus?.();
+    return;
+  }
+  // 编辑器侧校验 (如裁剪重绘还没框选): 也放在导出/上传之前, 不走一遍重活
+  const editorError = editor?.validate?.();
+  if (editorError) {
+    infoEl.textContent = "❌ " + editorError;
+    toast(editorError, "error", 6000);
+    return;
+  }
   let request;
   try {
     request = await collectRequest();
@@ -1236,7 +1673,7 @@ async function onGenerate() {
     const state = {
       model: C.model.get(), positive_prompt: C.positive.get(), negative_prompt: C.negative.get(),
       width: C.width.get(), height: C.height.get(), steps: C.steps.get(), scale: C.scale.get(),
-      cfg_rescale: C.cfgRescale.get(), seed: C.seed.get(), quantity: C.quantity.get(), furry_mode: furryMode,
+      cfg_rescale: C.cfgRescale.get(), seed: C.seed.get(), quantity: C.quantity.get(), furry_mode: furryMode, transparent_bg: transparentBg,
       enhance: { enabled: C.enhance.get(), amount: C.enhanceAmount.get(), magnitude: C.magnitude.get() },
       // 角色提示词一并持久化, 刷新后像正向提示词一样保持 (含禁用角色)
       characters: charList.getItems(),
@@ -1282,14 +1719,19 @@ function onJobFailed(ev) {
 
 // ---------------- 对外接口 ----------------
 
-export function onShow() {}
+export function onShow() {
+  // "发送到图片生成"等外部 set 发生在视图隐藏期间 (scrollHeight=0 量不到真实高度, 只会停在最小行数);
+  // 每次进入视图补一次自适应: 仍受 autosizeRows 的 6~15 行上下限约束, 超长自动出滚动条
+  C.positive?.refit?.();
+  C.negative?.refit?.();
+}
 
 /** 把图片载入图生图基础图片区, 并切到参数设置页签 (供输出区/图片浏览查看器调用) */
 export async function sendToImg2img(path) {
   if (!path) return false;
   try {
     await editor.loadImage(path);
-    toast("已加载到图生图编辑器 🎨", "success");
+    // "已加载到图生图编辑器" 提示由编辑器 loadImage 内部弹出, 这里不再重复
     // 切换到参数设置页签
     const bar = document.querySelector("#view-generate .tabs");
     if (bar) { [...bar.children].forEach((b, i) => b.classList.toggle("active", i === 0)); }
@@ -1503,11 +1945,37 @@ function buildPositionCanvas() {
 }
 
 export function getC() { return C; }
-export function setGenerateState(state) {
-  if (state.positive_prompt != null) C.positive.set(state.positive_prompt);
-  if (state.negative_prompt != null) C.negative.set(state.negative_prompt);
+export function setGenerateState(state, opts = {}) {
+  // 法术解析/画廊"发送到图片生成": 元数据里的正/负面提示词带有预设标签
+  // (生成时后端会追加质量预设、前置 UC 预设), 这里检测并剥离这些标签, 自动切换到对应预设
+  const switched = [];
+  const model = C.model.get();
+  if (state.positive_prompt != null) {
+    const hit = extractPresetTags(state.positive_prompt, model, "quality_preset_tags", "tail"); // 质量预设追加在末尾, 只从末尾剥离一次
+    let posText = state.positive_prompt;
+    if (hit.preset && applyPresetOption(C.quality, hit.preset)) {
+      posText = hit.text;
+      switched.push(`正面预设 → ${hit.preset}`);
+    }
+    // 预设剥离后再处理 transparent background (生成时顺序: 用户输入+TB+预设, 剥离顺序相反); 同步开关为图片真实状态
+    C.positive.set(syncTransparentBg(posText));
+  }
+  if (state.negative_prompt != null) {
+    const hit = extractPresetTags(state.negative_prompt, model, "uc_preset_tags", "head"); // UC 预设前置在开头, 只从开头剥离一次
+    if (hit.preset && applyPresetOption(C.uc, hit.preset)) {
+      C.negative.set(hit.text);
+      switched.push(`负面预设 → ${hit.preset}`);
+    } else {
+      C.negative.set(state.negative_prompt);
+    }
+  }
+  // opts.silent: 后台同步路径 (画廊"发送到法术解析"顺带更新图片生成表单) 不弹提示;
+  // 预设剥离与切换照常执行, 保证后续生成不会把元数据里的预设原文再重复拼一遍
+  if (switched.length && !opts.silent) toast(`已剥离预设标签并自动切换: ${switched.join("，")} ⭐`, "info");
   if (state.width != null) C.width.set(state.width);
   if (state.height != null) C.height.set(state.height);
+  // 外部送入的尺寸可能超限 (如从大图反推后发送), 立刻刷新像素提示, 别让告警信息停在旧值
+  if (state.width != null || state.height != null) updateResHint();
   if (state.steps != null) C.steps.set(state.steps);
   if (state.scale != null) C.scale.set(state.scale);
   if (state.cfg_rescale != null) C.cfgRescale.set(state.cfg_rescale);
@@ -1521,7 +1989,14 @@ export function setGenerateState(state) {
       enabled: !!c.enabled,
     })));
     charRegion.setCount(state.characters.length);
-    charRegion.restore(state.characters.map((c) => c.position ?? "A1"));
+    // 元数据导出的 position 是 5x5 网格标签 (自由坐标被吸附到 A1-E5 格心);
+    // v5 且后端给出原始 xy 时优先用 xy, 与 "加载上次" 的 toFixed(2) 精度一致, 切换模型时组件自会网格↔自由换算
+    const rawXy = isNai5(C.model.get());
+    charRegion.restore(state.characters.map((c) =>
+      (rawXy && Array.isArray(c.xy) && Number.isFinite(c.xy[0]) && Number.isFinite(c.xy[1]))
+        ? c.xy[0] + "," + c.xy[1]
+        : (c.position ?? "A1"),
+    ));
   }
 }
 

@@ -65,7 +65,16 @@ def _apply_runtime(data: dict) -> None:
 
         gen_queue.reload()
     except Exception:
-        pass
+        logger.opt(exception=True).debug("重建生图队列失败堆栈:")
+
+    # Token 列表变化时重新查询全部 Token 的剩余点数/用量 (点数查询较慢, 放后台)
+    if "tokens" in data:
+        try:
+            from utils.generator import inquire_all_anlas
+
+            threading.Thread(target=inquire_all_anlas, daemon=True, name="anlas-refresh").start()
+        except Exception:
+            logger.opt(exception=True).debug("启动点数查询线程失败堆栈:")
 
     # Token 列表变化时立即采样一次: 新加的 Token 马上出现在额度统计/可用性里
     if "tokens" in data or "token" in data:
@@ -84,11 +93,17 @@ def save_settings(data: dict) -> dict:
     for key in ("token", "proxy", "custom_path", "smtp_mail", "smtp_token"):
         if key in normalized and normalized[key] in (None, ""):
             normalized[key] = None if key in ("proxy", "token", "smtp_mail", "smtp_token") else ""
-    for key in ("cool_time", "port", "smtp_num"):
+    for key in ("cool_time", "port", "smtp_num", "anlas_remind_percent"):
         try:
             normalized[key] = int(normalized.get(key, 0))
         except (TypeError, ValueError):
             normalized[key] = 0
+    # 剩余用量提醒: 范围 -1 (关闭) ~ 100 (仅在前端提交了该字段时钳制)
+    if "anlas_remind_percent" in normalized:
+        try:
+            normalized["anlas_remind_percent"] = max(-1, min(100, int(normalized["anlas_remind_percent"])))
+        except (TypeError, ValueError):
+            normalized["anlas_remind_percent"] = -1
 
     _normalize_tokens(normalized)
 
@@ -115,7 +130,7 @@ def save_settings(data: dict) -> dict:
 
             apply_console_visibility()
         except Exception:
-            pass
+            logger.opt(exception=True).debug("应用控制台显隐失败堆栈:")
 
     # 其他运行时变化 (代理 / 队列) 在后台异步应用, 让 HTTP 响应快速返回
     threading.Thread(target=_apply_runtime, args=(normalized,), daemon=True).start()
@@ -129,7 +144,7 @@ def save_settings(data: dict) -> dict:
 
                 mark_plugins_reloading()
             except Exception:
-                pass
+                logger.opt(exception=True).debug("标记插件重载失败堆栈:")
 
         def _apply_share():
             try:
@@ -143,6 +158,7 @@ def save_settings(data: dict) -> dict:
                 ensure_tunnel()
             except Exception as e:
                 logger.error(f"共享链接切换失败: {e}")
+                logger.opt(exception=True).debug("共享链接切换失败堆栈:")
 
         threading.Thread(target=_apply_share, daemon=True).start()
 
@@ -155,7 +171,7 @@ def save_settings(data: dict) -> dict:
 
                 load_plugins()
             except Exception:
-                pass
+                logger.opt(exception=True).debug("加载插件失败堆栈:")
 
         threading.Thread(target=_reload_plugins, daemon=True).start()
 

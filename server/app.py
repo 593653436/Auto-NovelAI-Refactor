@@ -16,29 +16,46 @@ from utils.events import broker
 from utils.gen_queue import gen_queue
 from utils.logger import logger
 from utils.services import plugins_store
+from utils.variable import VERSION
 
 # 注意: 不能把路由模块导入为裸名 "queue", 否则会遮蔽标准库 queue,
 # 导致 /api/events 的 except queue.Empty 抛 AttributeError, SSE 事件流整体失效
-from .routes import generate, misc, plugins, settings, tools
+from .routes import generate, misc, plugins
 from .routes import queue as queue_routes
+from .routes import settings, tools
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Auto-NovelAI-Refactor", version="2.1.0")
+    # version 取自 utils/variable.VERSION (发布唯一真源, main.py 横幅同用它);
+    # 别再在这里写死号, 否则 openapi.json 与页面/终端三处会各说各话 (方案 P1-6)
+    app = FastAPI(title="Auto-NovelAI-Refactor", version=VERSION)
 
     # 后台预热常用缓存: 插件商店数据 (含 git 检查) 与提示词补全标签词典,
     # 避免打开商店页 / 首次输入提示词时的首次加载等待
+    def _warm_tag_cache():
+        """标签词典预热 (~2.5s 纯 CPU 解析 32.7 万行 CSV)。单独一个线程, 与下面的网络预热并行。"""
+        try:
+            misc._get_tag_cache()
+        except Exception as e:
+            logger.warning(f"标签词典预热失败: {e}")
+            logger.opt(exception=True).debug("标签词典预热失败堆栈:")
+
     def _warm_caches():
+        # 标签词典是纯 CPU 且会长时间持有 GIL, 原先串在预热链最前面, 后面几个网络预热
+        # (点数查询最坏 N×45s、插件商店含 git) 都要等它解析完才开始。改为与它们并发启动。
+        threading.Thread(target=_warm_tag_cache, daemon=True, name="warmup-tags").start()
+        try:
+            from utils.generator import inquire_all_anlas
+
+            inquire_all_anlas()
+        except Exception as e:
+            logger.debug(f"启动查询剩余点数失败: {e}")
+            logger.opt(exception=True).debug("启动查询剩余点数失败堆栈:")
         try:
             plugins_store.list_plugins()
         except Exception as e:
             logger.warning(f"插件商店数据预热失败: {e}")
-        try:
-            from .routes import misc
-
-            misc._get_tag_cache()
-        except Exception as e:
-            logger.warning(f"标签词典预热失败: {e}")
+            logger.opt(exception=True).debug("插件商店数据预热失败堆栈:")
         # 在线翻译多源引擎: 后台预导入 translators 库 (首次在线翻译不再卡几秒)
         try:
             from utils.translate import _get_tss
@@ -46,6 +63,7 @@ def create_app() -> FastAPI:
             _get_tss()
         except Exception as e:
             logger.debug(f"在线翻译库预热失败: {e}")
+            logger.opt(exception=True).debug("在线翻译库预热失败堆栈:")
 
     threading.Thread(target=_warm_caches, daemon=True, name="warmup").start()
 
@@ -57,6 +75,21 @@ def create_app() -> FastAPI:
         anlas_history.start_scheduler()
     except Exception as e:
         logger.warning(f"额度采样线程启动失败: {e}")
+    # 停止信号文件 (outputs/temp_break_<任务id>.json) 的清理机制:
+    # 进程被杀 (插件变更 os.execv 重启 / 关窗 / 崩溃) 时任务来不及删自己的文件, 会一直堆积。
+    # 这里启动时先清一次历史残留, 之后交给定期线程 + 退出兜底 (详见 utils/jobs.py)。
+    try:
+        from utils.jobs import start_break_cleanup
+
+        removed = start_break_cleanup()
+        if removed:
+            logger.info(
+                f"已清理 {len(removed)} 个无用的停止信号文件: {', '.join(removed[:5])}"
+                f"{' ...' if len(removed) > 5 else ''}"
+            )
+    except Exception as e:
+        logger.debug(f"停止信号文件清理机制启动失败 (不影响任务): {e}")
+        logger.opt(exception=True).debug("停止信号文件清理机制启动失败堆栈:")
 
     # 静态资源禁用启发式缓存: 每次用 ETag 协商, 文件有改动立即生效
     @app.middleware("http")
@@ -79,17 +112,21 @@ def create_app() -> FastAPI:
     async def events():
         async def stream():
             q = broker.subscribe()
+            loop = asyncio.get_running_loop()
             try:
                 # 先补发历史日志事件 (刷新页面后日志不丢失); 跳过 job/queue 事件, 避免刷新后重复弹 toast
                 for ev in broker.history("log"):
                     yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
                 while True:
+                    # 在 worker 线程里做带超时的阻塞取, 事件一到达就推送:
+                    # 原先 get_nowait() + 固定 sleep(0.5) 会让每条事件最多迟到 500ms,
+                    # 而且没有事件时也在刷 keepalive。
                     try:
-                        ev = q.get_nowait()
-                        yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+                        ev = await loop.run_in_executor(None, q.get, True, 0.5)
                     except queue.Empty:
-                        await asyncio.sleep(0.5)
                         yield ": keepalive\n\n"
+                        continue
+                    yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
             finally:
                 broker.unsubscribe(q)
 
@@ -98,17 +135,34 @@ def create_app() -> FastAPI:
     # 共享链接 (隧道) 访问时 Cloudflare 会缓冲 SSE 实时流, 前端退化为轮询本接口:
     # 增量拉取日志 + 队列快照, 每 2 秒一次
     @app.get("/api/live")
-    async def live_poll(log_after: int = 0, prime: bool = False):
+    async def live_poll(log_after: int = 0, notify_after: int = 0, anlas_after: int = 0, prime: bool = False):
         seq_now = broker.current_seq()
         if log_after > seq_now:
             log_after = 0  # 后端重启后序号已重置, 前端序号失效时重新全量拉取
+        if notify_after > seq_now:
+            notify_after = 0
+        if anlas_after > seq_now:
+            anlas_after = 0
         logs = broker.history_after("log", log_after)
         # 任务事件 (job:done 等) 也必须增量下发: 否则轮询模式下输出图片区不会刷新
         # prime=1 为首次调用: 只回补日志, 不回放历史任务事件 (避免刷新页面后重复渲染/重复通知)
         events = [] if prime else broker.events_after(log_after, ("job:start", "job:event", "job:done", "job:failed"))
+        notifications = broker.history_after("notice", notify_after)
+        anlas_events = broker.history_after("anlas:update", anlas_after)
         seqs = [e.get("seq", 0) for e in (*logs, *events)]
         last = seq_now if prime else (max(seqs) if seqs else min(log_after, seq_now))
-        return {"logs": logs, "events": events, "last": last, "queue": gen_queue.snapshot()}
+        notify_last = notifications[-1]["seq"] if notifications else min(notify_after, seq_now)
+        anlas_last = anlas_events[-1]["seq"] if anlas_events else min(anlas_after, seq_now)
+        return {
+            "logs": logs,
+            "events": events,
+            "last": last,
+            "notifications": notifications,
+            "notify_last": notify_last,
+            "anlas": anlas_events,
+            "anlas_last": anlas_last,
+            "queue": gen_queue.snapshot(),
+        }
 
     # 图标
     @app.get("/favicon.ico", include_in_schema=False)

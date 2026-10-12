@@ -15,3 +15,5 @@ gitpython>=3.1.40
 gradio-client>=1.0.0
 brotli>=1.1.0
 translators>=6.0.4  # 在线翻译多源免费接口 (搜狗/有道/阿里/彩云/腾讯等, 无需 API Key)
+pystray>=0.19.5  # 系统托盘图标 (打开/重启/关闭 右键菜单)
+piexif>=1.1.3  # JPEG 的 NovelAI 元数据读写 (utils/naimeta.py 硬导入; 上游漏写, 此处补上)

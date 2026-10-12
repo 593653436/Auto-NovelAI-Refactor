@@ -22,6 +22,7 @@ from utils.events import broker
 from utils.jobs import cleanup_break_file, normalize_result, pop_current_job, set_current_job, write_break_flag
 from utils.logger import logger
 from utils.tokens import get_tokens, mask_token, pop_thread_token, set_thread_token
+from utils.usage import tokens_with_no_usage
 
 
 def _new_id() -> str:
@@ -44,9 +45,10 @@ class _Task:
         "finished_at",
         "worker",
         "error",
+        "model",
     )
 
-    def __init__(self, name: str, fn: Callable, args: tuple, kwargs: dict, label: str | None):
+    def __init__(self, name: str, fn: Callable, args: tuple, kwargs: dict, label: str | None, model: str | None = None):
         self.id = _new_id()
         self.name = name
         self.label = label or name
@@ -59,6 +61,8 @@ class _Task:
         self.finished_at: float | None = None
         self.worker: int | None = None
         self.error: str | None = None
+        # 模型 id (仅图片生成任务提供): NAI5 + 无用量跳过规则需要按模型过滤通道
+        self.model = model
 
 
 class _Worker(threading.Thread):
@@ -82,8 +86,12 @@ class _Worker(threading.Thread):
                     break
                 if self.status != "paused":
                     self.status = "idle"  # 被额度/点数暂停的通道保留 paused 状态供前端展示
+                # 先 clear 再 wait: 若在 wait() 返回与 clear() 之间有人 submit(),
+                # 旧的 "wait 后 clear" 写法会把那次唤醒信号吞掉, 该任务最多白等 0.5s。
+                self.queue._wake.clear()
                 self.queue._wake.wait(0.5)
                 self.queue._wake.clear()
+                self.queue._wake.wait(0.5)
                 continue
             self._run_task(task)
             self._cooldown()
@@ -130,6 +138,8 @@ class _Worker(threading.Thread):
                 self.queue._tasks.pop(task.id, None)
             self.task_id = None
             cleanup_break_file(task.id)
+            # 不再在这里 sweep_break_files(): 它是全目录 glob + 逐文件 stat, 而 N 个通道同时
+            # 收尾就会并发扫 N 次; 孤儿信号文件由 utils.jobs 的 60s 定时清理线程统一负责。
             self.queue._publish()
 
     def _cooldown(self) -> None:
@@ -171,9 +181,21 @@ class GenerationQueue:
 
     # ---------------------------------------------------------------- 提交
 
-    def submit(self, name: str, fn: Callable, *args, label: str | None = None, **kwargs) -> _Task:
-        """把生成任务加入队列, 返回任务对象。"""
-        task = _Task(name, fn, args, kwargs, label)
+    def submit(
+        self, name: str, fn: Callable, *args, label: str | None = None, model: str | None = None, **kwargs
+    ) -> _Task | None:
+        """把生成任务加入队列, 返回任务对象 (model 仅供 NAI5 无用量跳过规则使用)。
+
+        启用 "用量为空时跳过 nai5 任务" 时: NAI5 任务在全部 Token 剩余用量 <= 0 的情况下
+        不入队, 直接返回 None (调用方负责提示)。
+        """
+        if model and env.skip_nai5_no_usage and str(model).startswith("nai-diffusion-5"):
+            from utils.usage import has_usable_token
+
+            if get_tokens() and not has_usable_token():
+                logger.warning(f"全部 Token 剩余用量已为空, 已跳过 NAI5 任务: [{label or name}]")
+                return None
+        task = _Task(name, fn, args, kwargs, label, model=model)
         with self._lock:
             self._tasks[task.id] = task
             self._order.append(task.id)
@@ -182,6 +204,11 @@ class GenerationQueue:
         self._publish()
         self._wake.set()
         return task
+
+    def running_ids(self) -> list[str]:
+        """当前运行中的任务 id (停止信号文件清理时用来判断哪些还在用)。"""
+        with self._lock:
+            return list(self._running.keys())
 
     def position(self, task_id: str) -> int:
         """任务在排队序列中的位置 (1 开始; 不在队列返回 0)。"""
@@ -255,13 +282,16 @@ class GenerationQueue:
             return False
 
     def _take_next(self, worker: _Worker) -> _Task | None:
-        """通道领取队首任务 (FIFO); 通道号超出期望数量时通知其退出。
+        """通道领取任务 (FIFO); 通道号超出期望数量时通知其退出。
 
-        多个空闲通道同时可用时, 只允许编号最小的通道领取: 通道按序号绑定 Token,
-        从而实现 "优先使用第一个 Token, 第一个忙/冷却时依次往后" 的分配策略。
+        - 普通任务: 保持原优先级策略, 存在编号更小的空闲通道时让位
+        - NAI5 任务 + 启用 "用量为空时跳过 nai5 任务": 剩余用量 <= 0 的 Token 通道
+          不可领取 (即使空闲); 任务按序交给第一个有剩余用量的 Token 通道
+          (该通道忙碌时任务在队列中等待); 全部 Token 无用量时跳过该任务并提示
         """
         with self._lock:
-            if worker.idx >= self.desired_workers():
+            desired = self.desired_workers()
+            if worker.idx >= desired:
                 worker.stop_flag.set()
                 return None
             # 额度/点数耗尽的 Token: 暂停领任务, 等额度恢复后自动继续 (停用期间不算空闲通道)
@@ -273,29 +303,79 @@ class GenerationQueue:
                 worker.pause_reason = ""
                 if worker.status == "paused":
                     worker.status = "idle"  # 额度已恢复: 通道重新可用
-            # 已被任务占用的通道集合 (含刚领到任务、status 尚未更新的通道)
             running_idx = {t.worker for t in self._running.values()}
-            # 存在编号更小的空闲通道时让位, 保证任务优先分配给靠前的 Token
-            for i in sorted(self._workers):
-                if i >= worker.idx:
-                    break
-                w = self._workers[i]
-                if not w.is_alive() or w.stop_flag.is_set() or i >= self.desired_workers():
-                    continue
-                if not self._token_usable(i):
-                    continue  # 被暂停的通道不参与让位, 否则队头任务会一直空等它
-                if w.status == "idle" and i not in running_idx:
-                    return None
-            while self._order:
-                tid = self._order.pop(0)
+            # 循环外算一次: 原先在逐任务扫描里反复调 get_tokens() / tokens_with_no_usage() /
+            # _has_smaller_idle_worker (后者还会每次排序 worker 表), 这些都与具体任务无关。
+            tokens = get_tokens()
+            empty = set(tokens_with_no_usage()) if tokens else set()
+            pos = 0
+            while pos < len(self._order):
+                tid = self._order[pos]
                 task = self._tasks.get(tid)
-                if task and task.status == "pending":
-                    task.status = "running"
-                    task.started_at = time.time()
-                    task.worker = worker.idx
-                    self._running[tid] = task
-                    return task
+                if task is None or task.status != "pending":
+                    pos += 1
+                    continue
+                if self._is_nai5_restricted(task) and tokens:
+                    eligible = next((i for i, tk in enumerate(tokens) if i < desired and tk not in empty), -1)
+                    if eligible < 0:
+                        # 全部 Token 无用量: 跳过该任务并提示 (日志 + WebUI 右上角通知)
+                        self._order.pop(pos)
+                        self._tasks.pop(tid, None)
+                        task.status = "cancelled"
+                        task.finished_at = time.time()
+                        task.error = "全部 Token 剩余用量已为空, 已跳过该 NAI5 任务"
+                        self._history.append(task)
+                        logger.warning(f"全部 Token 剩余用量已为空, 已跳过 NAI5 任务: [{task.label}]")
+                        try:
+                            broker.publish(
+                                "notice",
+                                {
+                                    "level": "warning",
+                                    "message": f"🪫 全部 Token 剩余用量已为空, 已跳过 NAI5 任务: [{task.label}]",
+                                },
+                            )
+                        except Exception:
+                            logger.opt(exception=True).debug("推送队列通知失败堆栈:")
+                        self._publish()
+                        continue  # 不前进 pos, 继续看下一个任务
+                    if worker.idx != eligible:
+                        pos += 1
+                        continue  # 本通道绑定的 Token 无用量 / 不是首个有用量通道: 不可领取该任务
+                elif self._has_smaller_idle_worker(worker.idx, running_idx, desired):
+                    # 普通任务让位: 存在编号更小的空闲通道, 任务优先分配给靠前的 Token
+                    return None
+                # 领取该任务
+                self._order.pop(pos)
+                task.status = "running"
+                task.started_at = time.time()
+                task.worker = worker.idx
+                self._running[tid] = task
+                return task
         return None
+
+    @staticmethod
+    def _is_nai5_restricted(task: _Task) -> bool:
+        """NAI5 任务且启用 "用量为空时跳过 nai5 任务"。"""
+        return bool(env.skip_nai5_no_usage) and str(task.model or "").startswith("nai-diffusion-5")
+
+    def _has_smaller_idle_worker(self, idx: int, running_idx: set, desired: int | None = None) -> bool:
+        """是否存在编号更小、可正常领取任务的空闲通道。
+
+        desired 由调用方传入时不再重算 (dispatch 热路径, 见 _take_next)。
+        """
+        if desired is None:
+            desired = self.desired_workers()
+        for i in sorted(self._workers):
+            if i >= idx:
+                break
+            w = self._workers[i]
+            if not w.is_alive() or w.stop_flag.is_set() or i >= desired:
+                continue
+            if not self._token_usable(i):
+                continue  # 被暂停的通道不参与让位, 否则队头任务会一直空等它
+            if w.status == "idle" and i not in running_idx:
+                return True
+        return False
 
     # ---------------------------------------------------------------- 取消 / 停止 / 排序
 
@@ -451,6 +531,7 @@ class GenerationQueue:
             broker.publish("queue:update", {"queue": self.snapshot()})
         except Exception as e:
             logger.debug(f"推送队列状态失败: {e}")
+            logger.opt(exception=True).debug("推送队列状态失败堆栈:")
 
 
 gen_queue = GenerationQueue()

@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import os
 import random
-from pathlib import Path
 
 from PIL import Image
 
+from src.retry import generate_with_retry as _generate_with_retry  # noqa: E402
 from utils.config import env
 from utils.generator import Generator
-from utils.helpers import check_stop, format_str, playsound, reset_stop, sleep_for_cool
+from utils.helpers import StopGeneration, check_stop, format_str, playsound, reset_stop, sleep_for_cool
 from utils.image_tools import image_to_base64
+from utils.images import IMAGE_EXTS, collect_images
 from utils.logger import logger
 from utils.models import director
 
@@ -19,23 +20,14 @@ generator = Generator("https://image.novelai.net/ai/augment-image")
 
 
 def _input_images(input_path: str | None, input_image: str | None) -> list[str]:
-    """收集待处理图片: 先单张图片, 再目录内全部图片 (同时输入时两者都处理)。"""
+    """收集待处理图片: 先单张图片, 再目录内全部图片 (同时输入时两者都处理)。
+
+    目录内只收扩展名受支持的图片 (原先用 sorted(os.listdir()) 不过滤扩展名,
+    目录里混进的 .txt 等会被送进导演工具)。实现见 utils.images.collect_images。
+    """
     os.makedirs("./outputs", exist_ok=True)
     reset_stop()  # 重置本任务的停止信号
-    images = []
-    if input_image:
-        images.append(input_image)
-    if input_path:
-        images.extend(str(Path(input_path) / f) for f in sorted(os.listdir(input_path)))
-    # 去重 (保留顺序: 先图片, 再目录)
-    seen = set()
-    result = []
-    for img in images:
-        key = os.path.abspath(img)
-        if key not in seen:
-            seen.add(key)
-            result.append(img)
-    return result
+    return collect_images(input_path, input_image, exts=IMAGE_EXTS)
 
 
 def _process(image_path: str, build_fn, image_type: str) -> str | None:
@@ -43,7 +35,7 @@ def _process(image_path: str, build_fn, image_type: str) -> str | None:
     with Image.open(image_path) as image:
         w, h = image.size
     json_data = build_fn(width=w, height=h, image=image_to_base64(image_path))
-    image_data = generator.generate(json_data)
+    image_data = _generate_with_retry(generator, json_data, os.path.basename(image_path), log_scope="导演工具重试失败")
     if not image_data:
         return None
     return generator.save(image_data, image_type, random.randint(1000000000, 9999999999))
@@ -100,7 +92,9 @@ def run_director(kind: str, input_path: str | None, input_image: str | None, opt
                 with Image.open(image_path) as image:
                     w, h = image.size
                 json_data = director.remove_bg(width=w, height=h, image=image_to_base64(image_path))
-                result = generator.generate(json_data)
+                result = _generate_with_retry(
+                    generator, json_data, f"{os.path.basename(image_path)} (Remove BG)", log_scope="导演工具重试失败"
+                )
                 if isinstance(result, tuple):
                     masked, generated, blend = result
                 else:
@@ -118,7 +112,11 @@ def run_director(kind: str, input_path: str | None, input_image: str | None, opt
                     image_list.append(path)
                     if not single:
                         sleep_for_cool(env.cool_time)
+        except StopGeneration:
+            logger.warning("已停止生成!")
+            break
         except Exception as e:
+            # 重试耗尽后的最终失败 (重试等待期间均已在 _generate_with_retry 内记录)
             logger.error(f"处理 {os.path.basename(image_path)} 失败: {e}")
             logger.opt(exception=True).debug("处理失败堆栈:")
             if not single:

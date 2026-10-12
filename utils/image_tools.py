@@ -7,6 +7,7 @@ from io import BytesIO
 from pathlib import Path
 
 import numpy as np
+import ujson
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 
@@ -49,16 +50,23 @@ def process_image_by_orientation(image_path):
 
 
 def change_the_mask_color(image_path):
-    """把遮罩转为白色前景 / 黑色背景。"""
+    """把遮罩转为白色前景 / 黑色背景 (唯一的蒙版后处理, 所见即所得)。
+
+    前端画布本身就是 8x8 网格上的二值蒙版 (绘制过的格子 alpha=255, 其余 alpha=0),
+    所以这里只做一次颜色映射, 不改变几何形状:
+        alpha != 0  ->  (255, 255, 255, 255)   白色 = 交给 AI 重绘
+        alpha == 0  ->  (0, 0, 0, 255)        黑色 = 保持原图不变
+
+    用 numpy 向量化: 蒙版是整图尺寸 (最大 1536x2048), 逐像素 Python 循环太慢。
+    """
     with Image.open(image_path) as image:
-        image = image.convert("RGBA")
-        pixels = image.load()
-        width, height = image.size
-        for x in range(width):
-            for y in range(height):
-                r, g, b, a = pixels[x, y]
-                pixels[x, y] = (255, 255, 255, 255) if a != 0 else (0, 0, 0, 255)
-        image.save(image_path)
+        arr = np.array(image.convert("RGBA"))
+        # 用 alpha 通道做二值判定: 非零 -> 白, 零 -> 黑; 三个颜色通道取同一结果
+        fg = (arr[:, :, 3] != 0)[:, :, None]
+        out = np.where(fg, np.uint8(255), np.uint8(0))
+        rgb = np.repeat(out, 3, axis=2)
+        alpha = np.full(arr.shape[:2] + (1,), 255, dtype=np.uint8)
+        Image.fromarray(np.concatenate([rgb, alpha], axis=2)).save(image_path)
     return image_path
 
 
@@ -81,83 +89,142 @@ def resize_image(image_path, output_path=None):
     return output_path or image_path
 
 
-def process_white_regions(image_path, output_path):
-    """把遮罩的白色区域按 8x8 网格扩张, 使遮罩更贴合被绘制区域。"""
-    img = Image.open(image_path)
-    img_array = np.array(img)
-    height, width = img_array.shape[:2]
-    if height % 64 != 0 or width % 64 != 0:
-        raise ValueError("图片尺寸必须是64的倍数")
+def ensure_mask_grid(image_path) -> str:
+    """校验蒙版尺寸是 64 的倍数 (8x8 网格的前提), 原样返回路径。
 
-    if len(img_array.shape) == 3:
-        gray = np.mean(img_array, axis=2)
-        binary = (gray > 128).astype(np.uint8) * 255
-    else:
-        binary = (img_array > 128).astype(np.uint8) * 255
+    历史上这里调用过 process_white_regions: 把白色区域按 8x8 网格做连通域扩张,
+    边界会被"鼓"到网格线上 —— 前端画的圆形/不规则笔迹经过它之后形状会变, 做不到所见即所得。
+    现在前端画笔本身就吸附在 8x8 网格上 (见 web/js/maskGrid.js 的 strokeCells),
+    蒙版与最终送进模型的内容逐格一致, 所以扩张这一步已经取消, 只保留尺寸校验。
+    """
+    with Image.open(image_path) as image:
+        width, height = image.size
+    if width % 64 != 0 or height % 64 != 0:
+        raise ValueError(f"蒙版尺寸必须是 64 的倍数, 当前为 {width}x{height}")
+    return image_path
 
-    grid_height, grid_width = height // 8, width // 8
-    white_grids = np.zeros((grid_height, grid_width), dtype=bool)
-    for i in range(grid_height):
-        for j in range(grid_width):
-            if np.any(binary[i * 8 : (i + 1) * 8, j * 8 : (j + 1) * 8] > 0):
-                white_grids[i, j] = True
 
-    visited = np.zeros_like(white_grids, dtype=bool)
-    regions = []
+def _extract_exif_metadata(image):
+    # 从 webp/jpeg 等格式的 EXIF 块读取 NovelAI 元数据。
+    # NAI 新版导出 (如 webp) 把参数写入 EXIF 而非 PNG 的 LSB:
+    #   ImageDescription (270) -> Description
+    #   Software (305)         -> Software (含模型哈希)
+    #   DocumentName (269)     -> Source/Title
+    #   UserComment (37510)    -> 一个 JSON 包装串 {"Comment": "<真实参数 JSON 串>", "Description":..., "Software":..., "Source":...}
+    #      其中的内层 "Comment" 才是法术解析需要的真实参数 JSON; 若顶层字段缺失则回退用包装串里的同名项。
+    # 任何一项缺失即视为不含 NAI 元数据 (返回 None)。
+    try:
+        exif = image.getexif()
+    except Exception:
+        return None
+    if not exif:
+        return None
+    # EXIF 标签整数 ID: ImageDescription=270, Software=305, DocumentName=269
+    # UserComment (37510, 含 Comment JSON) 在 Exif 子 IFD (0x8769) 中
+    desc = exif.get(270)
+    software = exif.get(305)
+    source = exif.get(269)
+    comment_raw = None
+    try:
+        for _tag, _val in exif.get_ifd(0x8769).items():
+            if _tag == 37510:
+                comment_raw = _val
+                break
+    except Exception:
+        comment_raw = None
 
-    def bfs(start_i, start_j):
-        region = []
-        queue = [(start_i, start_j)]
-        visited[start_i, start_j] = True
-        while queue:
-            i, j = queue.pop(0)
-            region.append((i, j))
-            for di, dj in [(0, 1), (1, 0), (0, -1), (-1, 0)]:
-                ni, nj = i + di, j + dj
-                if 0 <= ni < grid_height and 0 <= nj < grid_width and white_grids[ni, nj] and not visited[ni, nj]:
-                    visited[ni, nj] = True
-                    queue.append((ni, nj))
-        return region
+    comment = None
+    if isinstance(comment_raw, (bytes, bytearray)):
+        cb = bytes(comment_raw)
+        if cb.startswith(b"ASCII"):
+            cb = cb.split(b"ASCII", 1)[1].lstrip(b"\x00")
+        comment = cb.decode("utf-8", "replace")
+    elif isinstance(comment_raw, str):
+        comment = comment_raw
 
-    for i in range(grid_height):
-        for j in range(grid_width):
-            if white_grids[i, j] and not visited[i, j]:
-                regions.append(bfs(i, j))
+    if not comment and desc is None and software is None:
+        return None
 
-    result = binary.copy()
-    brush_half = 2
-    for region in regions:
-        region_i = [pos[0] for pos in region]
-        region_j = [pos[1] for pos in region]
-        min_i, max_i = min(region_i), max(region_i)
-        min_j, max_j = min(region_j), max(region_j)
-        top_distance, bottom_distance = min_i, grid_height - 1 - max_i
-        left_distance, right_distance = min_j, grid_width - 1 - max_j
-        expanded_min_i = max(0, min_i - (top_distance - (top_distance // 8) * 8))
-        expanded_max_i = min(grid_height - 1, max_i + (bottom_distance - (bottom_distance // 8) * 8))
-        expanded_min_j = max(0, min_j - (left_distance - (left_distance // 8) * 8))
-        expanded_max_j = min(grid_width - 1, max_j + (right_distance - (right_distance // 8) * 8))
-        for ci in range(expanded_min_i, expanded_max_i + 1):
-            for cj in range(expanded_min_j, expanded_max_j + 1):
-                s_i, e_i = max(0, ci - brush_half), min(grid_height, ci + brush_half)
-                s_j, e_j = max(0, cj - brush_half), min(grid_width, cj + brush_half)
-                if any(s_i <= pos[0] < e_i and s_j <= pos[1] < e_j for pos in region):
-                    result[s_i * 8 : e_i * 8, s_j * 8 : e_j * 8] = 255
+    # 解析 EXIF UserComment 包装串, 取出内层真实参数 JSON
+    inner_comment = None
+    try:
+        parsed = ujson.loads(comment)
+        if isinstance(parsed, dict):
+            if "Comment" in parsed and isinstance(parsed["Comment"], str):
+                inner_comment = parsed["Comment"]
+            # 顶层字段缺失时, 用包装串里的同名项补
+            if desc is None and parsed.get("Description"):
+                desc = parsed["Description"]
+            if software is None and parsed.get("Software"):
+                software = parsed["Software"]
+            if source is None and parsed.get("Source"):
+                source = parsed["Source"]
+    except Exception:
+        inner_comment = comment
 
-    Image.fromarray(result).save(output_path)
-    return output_path
+    return {
+        "Description": desc.decode("utf-8", "replace") if isinstance(desc, bytes) else desc,
+        "Software": software.decode("utf-8", "replace") if isinstance(software, bytes) else software,
+        "Source": source.decode("utf-8", "replace") if isinstance(source, bytes) else source,
+        # 返回内层真实参数 JSON 串, 供 _parse_comment 继续解析
+        "Comment": inner_comment if inner_comment is not None else comment,
+    }
+
+
+# image.info 里的二进制块 (ICC 色彩配置 / 原始 EXIF 数据流), 不作为文本元数据参与解析
+_BINARY_INFO_KEYS = {"icc_profile", "icc profile", "exif", "thumbnail", "photoshop"}
+
+# 非 PNG 格式的元数据键名不统一 (JPEG 注释段只暴露为小写的 comment), 归一成 NovelAI 的大写键
+_INFO_KEY_ALIASES = {
+    "comment": "Comment",
+    "description": "Description",
+    "software": "Software",
+    "source": "Source",
+}
+
+
+def _fallback_info(image) -> dict:
+    """兜底: 用 image.info 构造元数据字典。
+
+    JPEG 等格式把 NovelAI 的参数整个写在 JPEG COM 注释段里, Pillow 暴露为
+    image.info["comment"] 且是 bytes。旧实现把所有 bytes 值一律剔除, 等于把
+    唯一的 NAI 参数载体丢掉了 —— 这里改为解码后保留。
+    """
+    info: dict = {}
+    for key, value in (image.info or {}).items():
+        lower = key.lower() if isinstance(key, str) else key
+        if lower in _BINARY_INFO_KEYS:
+            continue
+        decoded = value
+        if isinstance(value, (bytes, bytearray)):
+            try:
+                decoded = bytes(value).decode("utf-8", "replace")
+            except Exception:
+                continue
+        if decoded is None or isinstance(decoded, (bytes, bytearray)):
+            continue
+        info[_INFO_KEY_ALIASES.get(lower, key)] = decoded
+    return info
 
 
 def get_image_information(image):
-    """读取图片的全部元数据 (优先解析 NovelAI 的 LSB 隐藏数据)。"""
+    """读取图片的全部元数据 (优先解析 NovelAI 的 LSB 隐藏数据, 其次 EXIF)。"""
     if isinstance(image, (str, Path)):
         with Image.open(image) as opened_image:
             return get_image_information(opened_image)
+    # PNG 走 LSB 隐写; webp/jpeg 等可能把参数写在 EXIF 块
+    if image.format != "PNG":
+        exif_meta = _extract_exif_metadata(image)
+        if exif_meta is not None:
+            return exif_meta
     try:
         pnginfo = extract_data(image)
     except Exception:
         pnginfo = None
-    return pnginfo if pnginfo is not None else image.info
+    # 兜底返回 image.info: 文本元数据保留 (含解码后的 comment), 真二进制块剔除 (避免接口 500)
+    if pnginfo is None:
+        pnginfo = _fallback_info(image)
+    return pnginfo
 
 
 def revert_image_info(image_path1, image_path2) -> bool:

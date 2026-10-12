@@ -23,6 +23,20 @@ export function el(tag, attrs = {}, children = []) {
   return node;
 }
 
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+/** 创建 SVG 元素: <svg>/<path> 等必须经 createElementNS 才有 SVG 命名空间 (el() 的 createElement 不识别, 会渲染为空白) */
+export function elSvg(tag, attrs = {}, children = []) {
+  const node = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v !== undefined && v !== null) node.setAttribute(k, v);
+  }
+  for (const c of [].concat(children)) {
+    if (c != null) node.append(c.nodeType ? c : document.createTextNode(c));
+  }
+  return node;
+}
+
 export function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
 }
@@ -97,6 +111,55 @@ export function filePicker({ accept = "*", placeholder = "未选择文件", labe
       nameBox.title = v || "";
     },
   };
+}
+
+// ---------------- 剪贴板 (顶栏复制链接等共用) ----------------
+
+/** 复制文本: 安全上下文 (localhost/127.x/https) 走 Clipboard API; http://局域网IP 等非安全上下文兜底隐藏 textarea + execCommand。返回是否成功。 */
+export function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    return navigator.clipboard.writeText(text).then(() => true, () => legacyCopy(text));
+  }
+  return Promise.resolve(legacyCopy(text));
+}
+
+function legacyCopy(text) {
+  try {
+    const ta = el("textarea", { style: "position:fixed;top:-9999px;opacity:0;" });
+    ta.value = text;
+    document.body.append(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+// ---------------- 原生目录选择按钮 (多个视图共用) ----------------
+
+/**
+ * "📁 选择文件夹" 按钮: 弹系统原生目录框, 把真实路径回填 input (不上传), 成功 toast 后回调 onPicked(path)。
+ * director / upscale / pnginfo / selector 四个视图共用这一份实现。
+ * @param {HTMLInputElement} input 回填目标输入框
+ * @param {object} opts { text: 按钮文字, title: 悬停提示, onPicked: 选择成功后的回调 }
+ */
+export function folderPickButton(input, { text = "📁 选择文件夹", title = "", onPicked = null } = {}) {
+  const btn = el("button", { class: "btn btn-sm btn-file", type: "button", text });
+  if (title) btn.title = title;
+  btn.addEventListener("click", async () => {
+    try {
+      const { pickFolder } = await import("./api.js");
+      const p = await pickFolder();
+      if (p) {
+        input.value = p;
+        toast(`已选择目录: ${p} 📂`, "success");
+        if (onPicked) onPicked(p);
+      }
+    } catch (e) { toast("选择目录失败: " + e.message, "error"); }
+  });
+  return btn;
 }
 
 // ---------------- 矩形拖拽上传区 (单张图片) ----------------
@@ -212,6 +275,24 @@ export function imageDropZone({ label = null, placeholder = "点击选择或拖�
  * 悬停持续慢滚, 点击快速翻页。返回包裹容器。
  * @param {HTMLElement} scrollEl 需要横向滚动的元素
  */
+// 共用的"回到可见时重新自适应"观察器: 元素 -> 回调, 避免为每个输入框各建一个 observer。
+let _autosizeObserver = null;
+const _autosizeCallbacks = new WeakMap();
+function observeAutosize(el, fn) {
+  if (!("IntersectionObserver" in window)) return;
+  _autosizeCallbacks.set(el, fn);
+  if (!_autosizeObserver) {
+    _autosizeObserver = new IntersectionObserver((entries) => {
+      for (const en of entries) {
+        if (!en.isIntersecting) continue;
+        const cb = _autosizeCallbacks.get(en.target);
+        if (cb) requestAnimationFrame(cb);
+      }
+    });
+  }
+  _autosizeObserver.observe(el);
+}
+
 export function edgeScroll(scrollEl) {
   const wrap = el("div", { class: "edge-scroll" });
   if (scrollEl.parentNode) scrollEl.parentNode.insertBefore(wrap, scrollEl);
@@ -221,12 +302,15 @@ export function edgeScroll(scrollEl) {
   const right = el("button", { class: "edge-btn edge-right", type: "button", html: "›", title: "向右滚动" });
   wrap.append(left, right);
 
-  let hoverTimer = null;
+  let hoverRaf = null;
   const speed = 7;
-  function stopHover() { if (hoverTimer) { clearInterval(hoverTimer); hoverTimer = null; } }
+  function stopHover() { if (hoverRaf) { cancelAnimationFrame(hoverRaf); hoverRaf = null; } }
   function startHover(dir) {
     stopHover();
-    hoverTimer = setInterval(() => { scrollEl.scrollLeft += dir * speed; }, 16);
+    // rAF 而不是 16ms setInterval: 与帧同步, 页面不可见/被节流时自动停,
+    // 且不会在标签页后台时继续空转。
+    const step = () => { scrollEl.scrollLeft += dir * speed; hoverRaf = requestAnimationFrame(step); };
+    hoverRaf = requestAnimationFrame(step);
   }
   left.addEventListener("mouseenter", () => startHover(-1));
   right.addEventListener("mouseenter", () => startHover(1));
@@ -287,8 +371,9 @@ export function toast(message, type = "info", _duration = 0) {
   close.addEventListener("click", () => closeToastNode(node));
   node.append(text, close);
   box.append(node);
-  // 10 秒后自动关闭 (也可手动点击 ✕)
-  setTimeout(() => closeToastNode(node), 10000);
+  // 默认 5 秒后自动关闭 (也可手动点击 ✕); 调用方显式传入的 _duration 优先
+  const _autoClose = _duration > 0 ? _duration : 5000;
+  setTimeout(() => closeToastNode(node), _autoClose);
   return node;
 }
 
@@ -322,7 +407,21 @@ export function confirmDialog(message, { danger = false } = {}) {
   });
 }
 
-/** 选择框: 在一组选项中选一个 (Esc/点击遮罩 = null)。choices: [{ label, value, danger?, primary? }] */
+/** 电源图标 (feather "power" 描边风, 内联 SVG): 不依赖 emoji 字体 / 本地 Twemoji 资源,
+ *  在所有平台渲染一致, 避免缺字形或本地资源缺失时显示成方框 (如 Windows 某些环境缺 U+23FB)。 */
+export function powerIcon(size = 15) {
+  return elSvg("svg", {
+    viewBox: "0 0 24 24", width: size, height: size, fill: "none",
+    stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round",
+    "aria-hidden": "true", focusable: "false",
+  }, [
+    elSvg("path", { d: "M18.36 6.64a9 9 0 1 1-12.73 0" }),
+    elSvg("line", { x1: "12", y1: "2", x2: "12", y2: "12" }),
+  ]);
+}
+
+/** 选择框: 在一组选项中选一个 (Esc/点击遮罩 = null)。choices: [{ label, value, danger?, primary?, icon? }]
+ *  title 可为字符串或 { icon, text } (icon 为 SVG 元素)。 */
 export function choiceDialog(title, message, choices) {
   return new Promise((resolve) => {
     const overlay = el("div", {
@@ -334,15 +433,26 @@ export function choiceDialog(title, message, choices) {
       overlay.remove();
       resolve(v);
     };
+    const titleNode = el("div", { class: "card-title" });
+    if (title && typeof title === "object" && title.icon) {
+      titleNode.append(title.icon, document.createTextNode(title.text ?? ""));
+    } else {
+      titleNode.textContent = title ?? "";
+    }
     const box = el("div", { class: "card dialog-solid", style: "width:340px;animation:pop-in 0.2s ease;" }, [
-      el("div", { class: "card-title", text: title }),
+      titleNode,
       el("p", { style: "margin-bottom:16px;font-size:13.5px;", text: message }),
       el("div", { style: "display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;" },
-        choices.map((c) => el("button", {
-          class: c.danger ? "btn btn-sm btn-danger" : c.primary ? "btn btn-sm btn-primary" : "btn btn-sm",
-          text: c.label,
-          onclick: () => done(c.value ?? c.label),
-        }))),
+        choices.map((c) => {
+          const btn = el("button", {
+            class: (c.danger ? "btn btn-sm btn-danger" : c.primary ? "btn btn-sm btn-primary" : "btn btn-sm")
+              + (c.icon ? " btn-with-icon" : ""),
+            text: c.label,
+            onclick: () => done(c.value ?? c.label),
+          });
+          if (c.icon) btn.prepend(c.icon);
+          return btn;
+        })),
     ]);
     overlay.append(box);
     overlay.addEventListener("click", (e) => { if (e.target === overlay) done(null); });
@@ -633,21 +743,30 @@ export function wireAutocomplete(textarea, wrap, opts = {}) {
   // 每个输入框独立计时器: 共享计时器会被其它输入框的 input 事件清除,
   // 导致补全列表不出现或在他处自发弹出
   let suggestTimer = null;
+  let suggestCtl = null; // 进行中的 /api/suggest: 新输入进来即取消旧请求 (慢响应后到不许覆盖新结果)
   textarea.addEventListener("input", () => {
     clearTimeout(suggestTimer);
+    if (suggestCtl) { suggestCtl.abort(); suggestCtl = null; }
     suggestTimer = setTimeout(async () => {
       // 焦点已不在本输入框时不弹出, 避免干扰其它参数操作
       if (document.activeElement !== textarea) { hide(); return; }
       const text = textarea.value;
       const kw = text.split(",").pop().trim();
       if (!kw) { hide(); return; }
+      const ctl = new AbortController();
+      suggestCtl = ctl;
       try {
         const { post } = await import("./api.js");
-        const res = await post("/api/suggest", { text });
+        const res = await post("/api/suggest", { text }, { signal: ctl.signal });
+        if (ctl.signal.aborted) return; // 等待期间已有更新的输入: 丢弃本次过期结果
         if (!res.items?.length) { hide(); return; }
         renderItems(res.items, res.keyword || kw);
-      } catch { hide(); }
-    }, 250);
+      } catch {
+        if (!ctl.signal.aborted) hide(); // 主动取消不算失败, 不要把新列表收起
+      } finally {
+        if (suggestCtl === ctl) suggestCtl = null;
+      }
+    }, 400); // 防抖 400ms: 补全不需要 250ms 那么跟手, 也减少后端查询次数
   });
 
   textarea.addEventListener("blur", () => setTimeout(hide, 200));
@@ -762,13 +881,22 @@ const fsApi = new WeakMap();
 export function initFancySelects() {
   if (initFancySelects._installed || typeof MutationObserver === "undefined") return;
   initFancySelects._installed = true;
+  // 性能: 这个 observer 监听整个 document.body 的 subtree, 应用里每一次列表重建
+  // (画廊网格 / 队列弹窗 / 点数下拉 / 通配符网格) 都会触发它。原先对每个新增节点
+  // 无条件跑 querySelectorAll("select"), 即使绝大多数子树里一个 select 都没有。
+  // 改为先用 querySelector 做一次廉价探测, 命中才继续。
   const mo = new MutationObserver((muts) => {
     for (const m of muts) {
-      m.addedNodes && m.addedNodes.forEach((n) => {
-        if (n.nodeType !== 1) return;
-        if (n.tagName === "SELECT") enhanceSelect(n);
-        else if (n.querySelectorAll) n.querySelectorAll("select").forEach(enhanceSelect);
-      });
+      if (m.addedNodes && m.addedNodes.length) {
+        for (const n of m.addedNodes) {
+          if (n.nodeType !== 1) continue;
+          if (n.tagName === "SELECT") { enhanceSelect(n); continue; }
+          // 快速排除: 整棵新增子树里没有 select 时不再做 list 级查询
+          if (n.querySelector && n.querySelector("select")) {
+            n.querySelectorAll("select").forEach(enhanceSelect);
+          }
+        }
+      }
       if (m.type === "childList" && m.target.tagName === "SELECT" && fsApi.has(m.target)) {
         fsApi.get(m.target).rebuild();
       }
@@ -871,6 +999,14 @@ export function makeField(spec, state) {
         placeholder: spec.placeholder || "",
         value: spec.default ?? "",
       });
+      // 只读 (如「读取元数据」的结果框): 用户改不了, 但动作的 set_field / 值还原仍能写入。
+      // 必须走 property —— readonly 是"存在即生效"的属性, setAttribute("readonly", false) 也会只读
+      // (同 el() 里 selected=false 的老问题)。
+      if (spec.readonly) {
+        input.readOnly = true;
+        input.classList.add("readonly");
+        if (!spec.placeholder) input.placeholder = "仅供查看, 不可编辑";
+      }
       // 高度随内容自适应 (最大 35 行, 超出出现滚动条)
       let autosizeFn = null;
       if (spec.autosize) {
@@ -887,12 +1023,10 @@ export function makeField(spec, state) {
         };
         input.addEventListener("input", autosizeFn);
         requestAnimationFrame(autosizeFn);
-        // 面板切回可见时自动重新自适应 (如刷新后切到画师设置页)
-        if ("IntersectionObserver" in window) {
-          new IntersectionObserver((entries) => {
-            entries.forEach((en) => { if (en.isIntersecting) requestAnimationFrame(autosizeFn); });
-          }).observe(input);
-        }
+        // 面板切回可见时自动重新自适应 (如刷新后切到画师设置页)。
+        // 原先每个自适应输入框都新建一个 IntersectionObserver 且从不 disconnect
+        // (插件页反复重建时会持续累积); 这里共用一个观察器。
+        observeAutosize(input, autosizeFn);
       }
       const head = el("div", { class: "prompt-head" }, [label]);
       // 提示词字段 (带自动补全): 标题行右侧加 Wildcards 按钮 (预设角标会由插件视图追加到同一行)
@@ -945,6 +1079,10 @@ export function makeField(spec, state) {
     }
     case "text": {
       input = el("input", { id: inputId, type: "text", placeholder: spec.placeholder || "", value: spec.default ?? "" });
+      if (spec.readonly) {
+        input.readOnly = true;
+        input.classList.add("readonly");
+      }
       wrap.append(label, input);
       if (spec.autocomplete) wireAutocomplete(input, wrap);
       return {
@@ -1117,6 +1255,18 @@ export function makeField(spec, state) {
         setValue: () => {},
         canvas,
         inputs: spec.inputs || [],
+      };
+    }
+    case "section": {
+      // 表单分区标题: 按功能类别把参数划分成若干区域 (label = 分区名, description = 分区说明)
+      // 不包 .field 外壳 (分区标题没有标题行与控件), 由插件视图直接放进左列表单卡片
+      return {
+        node: el("div", { class: "field-section" }, [
+          el("span", { class: "field-section-title", text: spec.label || "" }),
+          spec.description ? el("span", { class: "field-section-hint", text: spec.description }) : null,
+        ]),
+        getValue: () => null,
+        setValue: () => {},
       };
     }
     case "info":

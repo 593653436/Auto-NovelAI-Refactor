@@ -547,7 +547,7 @@ export function createAnlasPanel() {
         expiryNode = el("span", {
           style: "color:#e5484d;font-weight:600;",
           title: "订阅已失效 (如拼车到期/未续费): 该账号无法生成, 建议从设置里移除",
-          text: "⛔ 订阅已失效 (无法生图)",
+          text: "🚫 订阅已失效 (无法生图)",
         });
       } else if (s.expires_at) {
         const exp = new Date(Number(s.expires_at) * 1000);
@@ -559,7 +559,7 @@ export function createAnlasPanel() {
           style: urgent ? "color:#e5484d;font-weight:600;" : "color:var(--text-2);",
           title: `订阅到期: ${exp.toLocaleString()}`,
           text: expired
-            ? `⛔ 订阅已到期 (${md})`
+            ? `🚫 订阅已到期 (${md})`
             : `到期 ${md}${urgent ? ` (⚠️ 剩 ${days.toFixed(1)} 天)` : ` (剩 ${Math.floor(days)} 天)`}`,
         });
       }

@@ -19,7 +19,8 @@
       <div class="topbar-left">
         <img src="/assets/logo.ico" class="app-logo" alt="ANR Logo" />
         <a class="app-title" href="https://github.com/zhulinyv/Auto-NovelAI-Refactor" target="_blank" rel="noopener">Auto-NovelAI-Refactor</a>
-        <span class="version-badge" id="version-badge">v2.1.0</span>
+        <!-- 版本不在 HTML 写死: 由 app.js 取 /api/state 的 version 填充 (真源 utils/variable.VERSION, 方案 P1-6) -->
+        <span class="version-badge" id="version-badge"></span>
         <span class="hitokoto" id="hitokoto" title="一言"></span>
       </div>
       <div class="topbar-right">
@@ -27,9 +28,26 @@
         <button id="bg-toggle" class="icon-btn" title="自定义背景" aria-label="自定义背景">🖼️</button>
         <button id="appearance-toggle" class="icon-btn" title="外观设置 (颜色/模糊)" aria-label="外观设置">🎨</button>
         <button id="theme-toggle" class="icon-btn" title="切换深浅色主题" aria-label="切换主题">🌙</button>
+        <!-- 晴天娃娃开关: 图标由 app.js 按状态换成"带斜杠"版本 (与全屏按钮同一套换图标做法),
+             不用 emoji —— 本地 emoji 资源里没有玩偶码位, 缺字形会显示成方框 -->
+        <button id="charm-toggle" class="icon-btn" title="隐藏晴天娃娃" aria-label="隐藏晴天娃娃"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v2.6"/><circle cx="12" cy="9.2" r="4.6"/><path d="M9.1 13 7.4 21.5h9.2L14.9 13"/></svg></button>
+        <button id="fullscreen-toggle" class="icon-btn" title="全屏显示" aria-label="全屏显示"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg></button>
+        <button id="copy-link" class="icon-btn" title="复制访问链接 (共享开启时自动复制可共享的外链)" aria-label="复制访问链接"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></button>
+        <button id="hard-reload" class="icon-btn" title="强制刷新页面 (Ctrl+F5, 绕过缓存重新加载)" aria-label="强制刷新页面"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg></button>
         <button id="app-close" class="icon-btn" title="退出程序: 结束后端进程并关闭页面" aria-label="退出程序"><svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><path d="M12 2v10"/></svg></button>
       </div>
     </header>
+
+    <!-- 侧边栏挂件 (晴天娃娃): 顶端贴靠顶栏 (那个深色底面) 的下沿, 水平方向**贴着侧边栏的右边缘**
+         (右缘留一点余量、左缘与功能项标签文字留出安全间距), 不占位、不顶开导航。
+         挂在 #app 下而不是 .sidebar 里 —— 侧边栏是 overflow: hidden, 贴着顶栏下沿的头顶会被裁掉;
+         位置与宽度由 app.js 量算 (见 initSidebarCharm); 它同时还是一枚「回到顶部」按钮:
+         按住时绳子被拉长、挂件下落, 松手回弹并把右侧内容区滚回顶部 (见 initCharmTop)。 -->
+    <div class="sidebar-charm" id="sidebar-charm" role="button" tabindex="0"
+         title="回到顶部" aria-label="回到顶部">
+      <span class="charm-rope" aria-hidden="true"></span>
+      <img src="/assets/charm/sidebar-charm.png" alt="" draggable="false" />
+    </div>
 
     <div class="layout">
       <!-- 侧边导航 -->
@@ -88,6 +106,33 @@
 
   <!-- Toast 容器: 挂在 body 下, 不受 #app (z-index:1) 层叠上下文限制, 永远显示在所有弹窗最上层 -->
   <div id="toasts" class="toasts"></div>
+
+  <!-- 挂件气泡: 单击晴天娃娃时随机说一句丧气话 (文案在 app.js 的 CHARM_BUBBLE_LINES)。
+       跟 toast 一样挂在 body 下 —— 免得被 #app / .sidebar 的 overflow 裁掉, 也躲开它们各自的
+       层叠上下文; 代价是位置得自己按挂件的实测矩形算 (见 app.js 的 placeCharmBubble)。 -->
+  <div class="charm-bubble hidden" id="charm-bubble" role="status" aria-live="polite"></div>
+
+  <!-- 彩蛋遮罩: 连点晴天娃娃 4 次 -> 整个窗口闪几下 -> 用满屏血字 ("病态文字深渊") 盖满整个窗口,
+       4 秒后恢复原样。时序全在 app.js 的 playCharmEgg() 里; 这里只负责
+       "position: fixed + inset: 0 = 盖满整窗", 外加一层呼吸的血色。
+       里面那堆字**不是静态标记**: 每次触发都由 app.js 的 renderCharmEggChaos() 现随机生成,
+       而且彩蛋期间会一遍遍重排, 每遍都是一整层淡入盖住上一层 (交叉溶接, 不是硬切),
+       所以连点几次既不会看到同一屏, 换屏也不会像频闪。 -->
+  <div class="charm-egg hidden" id="charm-egg" aria-hidden="true">
+    <div class="charm-egg-words" id="charm-egg-words"></div>
+  </div>
+
+  <!-- 彩蛋音乐: 连点晴天娃娃 4 次时, 和上面那张图同一时刻起播的一段高潮 (见 app.js 的
+       playCharmEggAudio)。三段备选, 每次**随机挑一段**, 所以连着触发不会老听到同一段:
+         前段 17.4s 起 / 中段 34.1s 起 / 结尾 66.4s 起  (都是 8.5 秒, 响度已互相对齐)
+       淡入淡出和左右交替都是 app.js 用 Web Audio 实时做的, 没有烙进文件, 所以改时长不用重切音频。
+       放成页面的静态节点而不是 JS 里 new Audio(): 页面一加载就开始缓冲, 连点到第 4 下时不用等网络;
+       三段一起 preload 也就 600KB, 本地服务端取一次的事。
+       class 是 app.js 找这三段的钩子 (见 charmEggAudioEls), 别改成 id —— 那会退化回只能挑一段。
+       没有 controls 属性, 浏览器不会给它们任何可见占位。 -->
+  <audio class="charm-egg-audio" src="/assets/charm/charm-egg-climax-early.mp3" preload="auto"></audio>
+  <audio class="charm-egg-audio" src="/assets/charm/charm-egg-climax-mid.mp3" preload="auto"></audio>
+  <audio class="charm-egg-audio" src="/assets/charm/charm-egg-climax-late.mp3" preload="auto"></audio>
   <script src="/js/vendor/twemoji.min.js"></script>
   <script type="module" src="/js/app.js"></script>
 </body>

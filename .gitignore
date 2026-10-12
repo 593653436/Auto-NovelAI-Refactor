@@ -15,6 +15,7 @@ tests/
 settings.json
 outputs/
 last.json
+.webui-browser/
 
 # ================= 运行时生成 (插件 / 通配符 / 超分模型) =================
 plugins/
@@ -39,7 +40,9 @@ assets/rife-ncnn-vulkan
 !/wildcards/表情/嘟嘴.txt
 !/wildcards/表情/爱心眼.txt
 !/wildcards/角色/GawrGura.txt
+!/wildcards/角色/GawrGura.png
 !/wildcards/角色/可莉.txt
+!/wildcards/角色/可莉.png
 !/wildcards/角色/拉菲.txt
 !/wildcards/角色/独角兽.txt
 !/wildcards/角色/纳西妲.txt
